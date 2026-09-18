@@ -721,6 +721,8 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
     return err;
   }
 
+  int64_t last_heartbeat_us = 0;
+
   EventBits_t bits = xEventGroupWaitBits(
       context.events,
       kConnectedBit | kDisconnectedBit | kProtocolErrorBit,
@@ -751,7 +753,7 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
   ESP_LOGW(kTag,
            "Slice 2 runtime active; set/fade/blackout/state/config enabled, identify gated");
 
-  int64_t last_heartbeat_us = esp_timer_get_time();
+  last_heartbeat_us = esp_timer_get_time();
   while (true) {
     bits = xEventGroupWaitBits(
         context.events,
