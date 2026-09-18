@@ -263,6 +263,241 @@ std::vector<ChannelLevelV1> blackout_levels(
   return levels;
 }
 
+void push_event_locked(LightingCommandEvent event) {
+  constexpr size_t kEventCapacity = 8;
+  if (g_events.size() >= kEventCapacity) {
+    g_events.erase(g_events.begin());
+  }
+  g_events.push_back(std::move(event));
+}
+
+void cancel_active_locked(const char *reason, bool emit_event) {
+  if (!g_fade.active) return;
+  if (emit_event) {
+    LightingCommandEvent event;
+    event.command_id = g_fade.command_id;
+    event.status = "CANCELLED";
+    event.error_code = "COMMAND_SUPERSEDED";
+    event.category = "CANCELLED";
+    event.message = reason != nullptr ? reason : "superseded";
+    push_event_locked(std::move(event));
+  }
+  g_fade.active = false;
+}
+
+double current_level_for(const std::vector<ChannelLevelV1> &levels,
+                         const std::string &key) {
+  auto it = std::find_if(
+      levels.begin(), levels.end(),
+      [&](const auto &entry) { return entry.channel_key == key; });
+  return it != levels.end() ? it->level : 0.0;
+}
+
+bool normalize_requested(
+    const std::vector<LightingChannelConfigV1> &configuration,
+    const std::vector<ChannelLevelV1> &requested,
+    bool clamp_targets,
+    std::vector<ChannelLevelV1> *values,
+    std::vector<DmxSlotValue> *updates,
+    std::string *error_message) {
+  if (values == nullptr || updates == nullptr || error_message == nullptr ||
+      requested.empty()) {
+    return false;
+  }
+
+  values->clear();
+  updates->clear();
+  for (const auto &request : requested) {
+    auto it = std::find_if(
+        configuration.begin(), configuration.end(),
+        [&](const auto &cfg) { return cfg.channel_key == request.channel_key; });
+    if (it == configuration.end() || !it->enabled || it->kind == "UNUSED") {
+      *error_message = "Requested lighting channel is unknown or disabled";
+      return false;
+    }
+
+    double level = request.level;
+    if (clamp_targets) {
+      if (level < it->minimum_level) level = it->minimum_level;
+      if (level > it->maximum_level) level = it->maximum_level;
+    }
+    values->push_back(ChannelLevelV1{it->channel_key, level});
+    updates->push_back(DmxSlotValue{
+        static_cast<uint8_t>(it->channel_number),
+        level_to_dmx(*it, level),
+    });
+  }
+  return true;
+}
+
+void update_levels_locked(const std::vector<ChannelLevelV1> &values) {
+  for (const auto &value : values) {
+    auto level_it = std::find_if(
+        g_levels.begin(), g_levels.end(),
+        [&](const auto &existing) {
+          return existing.channel_key == value.channel_key;
+        });
+    if (level_it != g_levels.end()) {
+      level_it->level = value.level;
+    } else {
+      g_levels.push_back(value);
+    }
+  }
+}
+
+void fade_task(void *) {
+  TickType_t last_wake = xTaskGetTickCount();
+  while (true) {
+    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(20));
+
+    if (g_operation_lock == nullptr ||
+        xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
+      continue;
+    }
+    if (g_lock == nullptr ||
+        xSemaphoreTake(g_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
+      xSemaphoreGive(g_operation_lock);
+      continue;
+    }
+
+    if (!g_fade.active || !g_ready) {
+      xSemaphoreGive(g_lock);
+      xSemaphoreGive(g_operation_lock);
+      continue;
+    }
+
+    const ActiveFadeInternal fade = g_fade;
+    const std::vector<LightingChannelConfigV1> configuration =
+        g_configuration;
+    const int64_t now_us = esp_timer_get_time();
+    const int64_t duration_us = fade.duration_ms * 1000LL;
+    double fraction = duration_us <= 0
+                          ? 1.0
+                          : static_cast<double>(now_us - fade.started_us) /
+                                static_cast<double>(duration_us);
+    if (fraction < 0.0) fraction = 0.0;
+    if (fraction > 1.0) fraction = 1.0;
+
+    std::vector<ChannelLevelV1> levels;
+    levels.reserve(fade.targets.size());
+    std::vector<DmxSlotValue> updates;
+    updates.reserve(fade.targets.size());
+
+    bool valid = true;
+    for (size_t i = 0; i < fade.targets.size(); ++i) {
+      const auto &target = fade.targets[i];
+      const double start =
+          i < fade.from.size() ? fade.from[i].level : 0.0;
+      const double level = start + (target.level - start) * fraction;
+      auto cfg = std::find_if(
+          configuration.begin(), configuration.end(),
+          [&](const auto &item) {
+            return item.channel_key == target.channel_key;
+          });
+      if (cfg == configuration.end() || !cfg->enabled ||
+          cfg->kind == "UNUSED") {
+        valid = false;
+        break;
+      }
+      levels.push_back(ChannelLevelV1{target.channel_key, level});
+      updates.push_back(DmxSlotValue{
+          static_cast<uint8_t>(cfg->channel_number),
+          level_to_dmx(*cfg, level),
+      });
+    }
+    xSemaphoreGive(g_lock);
+
+    const esp_err_t output_err =
+        valid ? lighting_output_apply_slots(updates) : ESP_ERR_INVALID_STATE;
+
+    if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+      if (g_fade.active && g_fade.generation == fade.generation) {
+        if (output_err != ESP_OK) {
+          LightingCommandEvent event;
+          event.command_id = fade.command_id;
+          event.status = "FAILED";
+          event.error_code = "DMX_OUTPUT_FAILED";
+          event.category = "DEVICE";
+          event.message = "DMX fade frame was not confirmed by the output task";
+          push_event_locked(std::move(event));
+          g_fade.active = false;
+          g_authority = "FAILSAFE";
+        } else {
+          update_levels_locked(levels);
+          g_authority = "STAGECORE";
+          if (fraction >= 1.0) {
+            LightingCommandEvent event;
+            event.command_id = fade.command_id;
+            event.status = "COMPLETED";
+            event.levels = fade.targets;
+            event.blackout = fade.blackout;
+            event.fade_ms = fade.duration_ms;
+            push_event_locked(std::move(event));
+            g_fade.active = false;
+          }
+        }
+      }
+      xSemaphoreGive(g_lock);
+    }
+    xSemaphoreGive(g_operation_lock);
+  }
+}
+
+esp_err_t start_fade_locked(
+    const std::string &command_id,
+    const std::vector<ChannelLevelV1> &targets,
+    int64_t fade_ms,
+    bool blackout,
+    std::vector<ChannelLevelV1> *normalized,
+    std::string *error_message) {
+  if (command_id.empty() || targets.empty() || fade_ms <= 0 ||
+      normalized == nullptr || error_message == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  if (!g_ready) {
+    xSemaphoreGive(g_lock);
+    *error_message = "No validated lighting configuration is installed";
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  std::vector<DmxSlotValue> ignored_updates;
+  std::vector<ChannelLevelV1> values;
+  if (!normalize_requested(g_configuration, targets, !blackout,
+                           &values, &ignored_updates, error_message)) {
+    xSemaphoreGive(g_lock);
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  cancel_active_locked(
+      blackout ? "superseded by blackout" : "superseded by newer fade",
+      true);
+
+  ActiveFadeInternal fade;
+  fade.active = true;
+  fade.generation = g_next_fade_generation++;
+  fade.command_id = command_id;
+  fade.started_us = esp_timer_get_time();
+  fade.duration_ms = fade_ms;
+  fade.targets = values;
+  fade.blackout = blackout;
+  fade.from.reserve(values.size());
+  for (const auto &target : values) {
+    fade.from.push_back(ChannelLevelV1{
+        target.channel_key,
+        current_level_for(g_levels, target.channel_key),
+    });
+  }
+  g_fade = std::move(fade);
+  g_authority = "STAGECORE";
+  *normalized = values;
+  xSemaphoreGive(g_lock);
+  return ESP_OK;
+}
+
 esp_err_t write_config_blob(const std::string &canonical) {
   if (canonical.empty() || canonical.size() > kMaxStoredConfig) {
     return ESP_ERR_INVALID_SIZE;
@@ -357,6 +592,14 @@ bool copy_state(std::vector<LightingChannelConfigV1> *configuration,
 esp_err_t lighting_configuration_init() {
   esp_err_t err = ensure_lock();
   if (err != ESP_OK) return err;
+
+  if (g_fade_task == nullptr) {
+    if (xTaskCreate(&fade_task, "stagecore-fade", 6144, nullptr, 9,
+                    &g_fade_task) != pdPASS) {
+      g_fade_task = nullptr;
+      return ESP_ERR_NO_MEM;
+    }
+  }
 
   std::string canonical;
   err = read_config_blob(&canonical);
