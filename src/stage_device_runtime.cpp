@@ -7,6 +7,7 @@
 #include "cJSON.h"
 #include "command_contract.h"
 #include "lighting_contract.h"
+#include "lighting_configuration.h"
 #include "lighting_output.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -67,11 +68,20 @@ const char *reset_reason_name(esp_reset_reason_t reason) {
 cJSON *capabilities_json() {
   cJSON *array = cJSON_CreateArray();
   if (array == nullptr) return nullptr;
-  cJSON *blackout = cJSON_CreateString("lighting.blackout");
-  if (blackout == nullptr || !cJSON_AddItemToArray(array, blackout)) {
-    if (blackout != nullptr) cJSON_Delete(blackout);
-    cJSON_Delete(array);
-    return nullptr;
+  static constexpr const char *kCapabilities[] = {
+      "lighting.channels.set",
+      "lighting.blackout",
+      "lighting.state.read",
+      "lighting.config.read",
+      "lighting.config.apply",
+  };
+  for (const char *capability : kCapabilities) {
+    cJSON *item = cJSON_CreateString(capability);
+    if (item == nullptr || !cJSON_AddItemToArray(array, item)) {
+      if (item != nullptr) cJSON_Delete(item);
+      cJSON_Delete(array);
+      return nullptr;
+    }
   }
   return array;
 }
@@ -98,11 +108,20 @@ cJSON *observed_state_json() {
     cJSON_Delete(state);
     return nullptr;
   }
+  for (const auto &entry : lighting_current_levels()) {
+    cJSON_AddNumberToObject(levels, entry.channel_key.c_str(), entry.level);
+  }
   cJSON_AddItemToObject(state, "current_levels", levels);
   cJSON_AddBoolToObject(state, "dmx_healthy",
                         lighting_output_dmx_healthy());
+  const std::string configuration_hash = lighting_configuration_hash();
+  if (!configuration_hash.empty()) {
+    cJSON_AddStringToObject(state, "configuration_hash",
+                            configuration_hash.c_str());
+  }
   cJSON_AddBoolToObject(state, "brownout_warning", false);
-  cJSON_AddStringToObject(state, "authority", "FAILSAFE");
+  const std::string authority = lighting_authority();
+  cJSON_AddStringToObject(state, "authority", authority.c_str());
   return state;
 }
 
@@ -299,6 +318,43 @@ esp_err_t send_text(esp_websocket_client_handle_t client,
   return sent == static_cast<int>(message.size()) ? ESP_OK : ESP_FAIL;
 }
 
+std::string completed_result(const std::string &device_id,
+                             const std::string &command_id,
+                             cJSON *payload) {
+  cJSON *root = cJSON_CreateObject();
+  if (root == nullptr) {
+    if (payload != nullptr) cJSON_Delete(payload);
+    return {};
+  }
+  cJSON_AddStringToObject(root, "type", "command.result");
+  cJSON_AddNumberToObject(root, "schema_version", 1);
+  cJSON_AddStringToObject(root, "device_id", device_id.c_str());
+  cJSON_AddStringToObject(root, "command_id", command_id.c_str());
+  cJSON_AddStringToObject(root, "status", "COMPLETED");
+  if (payload != nullptr) cJSON_AddItemToObject(root, "payload", payload);
+  const std::string result = print_json(root);
+  cJSON_Delete(root);
+  return result;
+}
+
+std::string levels_payload(
+    const std::vector<ChannelLevelV1> &levels) {
+  cJSON *payload = cJSON_CreateObject();
+  cJSON *values = cJSON_CreateObject();
+  if (payload == nullptr || values == nullptr) {
+    if (payload != nullptr) cJSON_Delete(payload);
+    if (values != nullptr) cJSON_Delete(values);
+    return {};
+  }
+  for (const auto &entry : levels) {
+    cJSON_AddNumberToObject(values, entry.channel_key.c_str(), entry.level);
+  }
+  cJSON_AddItemToObject(payload, "levels", values);
+  const std::string out = print_json(payload);
+  cJSON_Delete(payload);
+  return out;
+}
+
 esp_err_t process_pending_command(RuntimeContext *context,
                                   esp_websocket_client_handle_t client) {
   if (context == nullptr || context->command_lock == nullptr ||
@@ -343,6 +399,91 @@ esp_err_t process_pending_command(RuntimeContext *context,
     return send_text(client, result);
   }
 
+  if (decision.command.command_type == "LIGHTING_CONFIG_APPLY") {
+    std::string configuration_hash;
+    const esp_err_t apply_err =
+        lighting_configuration_apply(payload.configuration,
+                                     &configuration_hash);
+    if (apply_err != ESP_OK) {
+      const std::string result = make_command_result(
+          context->device_id, decision.command.command_id, "FAILED",
+          "CONFIGURATION_APPLY_FAILED", "CONFIGURATION",
+          "Validated configuration could not be persisted in safe blackout",
+          true);
+      context->dedupe.Remember(decision.command.command_id, result);
+      return send_text(client, result);
+    }
+
+    cJSON *result_payload = cJSON_CreateObject();
+    if (result_payload == nullptr) return ESP_ERR_NO_MEM;
+    cJSON_AddBoolToObject(result_payload, "configuration_applied", true);
+    cJSON_AddStringToObject(result_payload, "safe_state", "BLACKOUT");
+    cJSON_AddStringToObject(result_payload, "configuration_hash",
+                            configuration_hash.c_str());
+    const std::string result = completed_result(
+        context->device_id, decision.command.command_id, result_payload);
+    if (result.empty()) return ESP_FAIL;
+    context->dedupe.Remember(decision.command.command_id, result);
+    return send_text(client, result);
+  }
+
+  if (decision.command.command_type == "LIGHTING_CONFIG_READ") {
+    const std::string canonical = lighting_configuration_json();
+    if (canonical.empty()) {
+      const std::string result = make_command_result(
+          context->device_id, decision.command.command_id, "REJECTED",
+          "DEVICE_CONFIGURATION_REQUIRED", "CONFIGURATION",
+          "No validated lighting configuration is installed", true);
+      context->dedupe.Remember(decision.command.command_id, result);
+      return send_text(client, result);
+    }
+    cJSON *configuration =
+        cJSON_ParseWithLength(canonical.data(), canonical.size());
+    if (configuration == nullptr) return ESP_ERR_INVALID_RESPONSE;
+    const std::string result = completed_result(
+        context->device_id, decision.command.command_id, configuration);
+    if (result.empty()) return ESP_FAIL;
+    context->dedupe.Remember(decision.command.command_id, result);
+    return send_text(client, result);
+  }
+
+  if (decision.command.command_type == "LIGHTING_CHANNELS_SET") {
+    std::vector<ChannelLevelV1> normalized;
+    std::string set_error;
+    const esp_err_t set_err =
+        lighting_channels_set(payload.channels, &normalized, &set_error);
+    if (set_err != ESP_OK) {
+      const bool configuration_missing =
+          set_err == ESP_ERR_INVALID_STATE;
+      const bool output_failed =
+          set_err != ESP_ERR_INVALID_STATE &&
+          set_err != ESP_ERR_NOT_FOUND;
+      const std::string result = make_command_result(
+          context->device_id, decision.command.command_id,
+          output_failed ? "FAILED" : "REJECTED",
+          configuration_missing ? "DEVICE_CONFIGURATION_REQUIRED"
+                                : (output_failed ? "DMX_OUTPUT_FAILED"
+                                                 : "CHANNEL_LEVEL_INVALID"),
+          configuration_missing ? "CONFIGURATION"
+                                : (output_failed ? "DEVICE" : "VALIDATION"),
+          set_error.c_str(),
+          configuration_missing || output_failed);
+      context->dedupe.Remember(decision.command.command_id, result);
+      return send_text(client, result);
+    }
+
+    const std::string payload_json = levels_payload(normalized);
+    if (payload_json.empty()) return ESP_FAIL;
+    cJSON *result_payload =
+        cJSON_ParseWithLength(payload_json.data(), payload_json.size());
+    if (result_payload == nullptr) return ESP_ERR_INVALID_RESPONSE;
+    const std::string result = completed_result(
+        context->device_id, decision.command.command_id, result_payload);
+    if (result.empty()) return ESP_FAIL;
+    context->dedupe.Remember(decision.command.command_id, result);
+    return send_text(client, result);
+  }
+
   if (decision.command.command_type == "LIGHTING_BLACKOUT") {
     if (payload.fade_ms != 0) {
       const std::string result = make_command_result(
@@ -353,7 +494,7 @@ esp_err_t process_pending_command(RuntimeContext *context,
       return send_text(client, result);
     }
 
-    const esp_err_t output_err = lighting_output_blackout_immediate();
+    const esp_err_t output_err = lighting_blackout(false);
     if (output_err != ESP_OK) {
       const std::string result = make_command_result(
           context->device_id, decision.command.command_id, "FAILED",
@@ -363,35 +504,23 @@ esp_err_t process_pending_command(RuntimeContext *context,
       return send_text(client, result);
     }
 
-    cJSON *root = cJSON_CreateObject();
-    if (root == nullptr) return ESP_ERR_NO_MEM;
-    cJSON_AddStringToObject(root, "type", "command.result");
-    cJSON_AddNumberToObject(root, "schema_version", 1);
-    cJSON_AddStringToObject(root, "device_id", context->device_id.c_str());
-    cJSON_AddStringToObject(root, "command_id",
-                            decision.command.command_id.c_str());
-    cJSON_AddStringToObject(root, "status", "COMPLETED");
     cJSON *result_payload = cJSON_CreateObject();
-    if (result_payload == nullptr) {
-      cJSON_Delete(root);
-      return ESP_ERR_NO_MEM;
-    }
+    if (result_payload == nullptr) return ESP_ERR_NO_MEM;
     cJSON_AddBoolToObject(result_payload, "blackout", true);
     cJSON_AddNumberToObject(result_payload, "fade_ms", 0);
-    cJSON_AddItemToObject(root, "payload", result_payload);
-    const std::string result = print_json(root);
-    cJSON_Delete(root);
+    const std::string result = completed_result(
+        context->device_id, decision.command.command_id, result_payload);
     if (result.empty()) return ESP_FAIL;
-
     context->dedupe.Remember(decision.command.command_id, result);
     return send_text(client, result);
   }
 
-  if (decision.command.command_type == "LIGHTING_CHANNELS_SET") {
-    const std::string result = make_command_result(
-        context->device_id, decision.command.command_id, "REJECTED",
-        "DEVICE_CONFIGURATION_REQUIRED", "CONFIGURATION",
-        "No validated channel configuration is installed yet", true);
+  if (decision.command.command_type == "LIGHTING_STATE_READ") {
+    cJSON *state = observed_state_json();
+    if (state == nullptr) return ESP_ERR_NO_MEM;
+    const std::string result = completed_result(
+        context->device_id, decision.command.command_id, state);
+    if (result.empty()) return ESP_FAIL;
     context->dedupe.Remember(decision.command.command_id, result);
     return send_text(client, result);
   }
@@ -507,7 +636,7 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
 
   ESP_LOGI(kTag, "Stage Device runtime.ready accepted");
   ESP_LOGW(kTag,
-           "Slice 2 validation active; immediate blackout enabled, other execution gated");
+           "Slice 2 runtime active; set/blackout/state/config enabled, fade/identify gated");
 
   while (true) {
     bits = xEventGroupWaitBits(
