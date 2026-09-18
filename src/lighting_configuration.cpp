@@ -695,6 +695,21 @@ bool copy_state(std::vector<LightingChannelConfigV1> *configuration,
   return ready;
 }
 
+esp_err_t restore_identify_for_partial_operation(const char *reason) {
+  DmxSlotValue restore{};
+  bool had_identify = false;
+  if (g_lock == nullptr ||
+      xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  had_identify =
+      cancel_identify_locked(reason, true, &restore);
+  xSemaphoreGive(g_lock);
+
+  if (!had_identify) return ESP_OK;
+  return lighting_output_apply_slots({restore});
+}
+
 }  // namespace
 
 esp_err_t lighting_configuration_init() {
