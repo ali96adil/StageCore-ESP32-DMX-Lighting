@@ -1,6 +1,7 @@
 #include "command_contract.h"
 
 #include <cstring>
+#include <utility>
 
 #include "cJSON.h"
 #include "trusted_clock.h"
