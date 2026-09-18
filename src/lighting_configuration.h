@@ -23,6 +23,8 @@ struct LightingCommandEvent {
   std::string category;
   std::string message;
   std::vector<ChannelLevelV1> levels;
+  bool blackout = false;
+  int64_t fade_ms = 0;
 };
 
 struct LightingActiveFade {
