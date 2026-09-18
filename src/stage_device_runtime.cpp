@@ -387,6 +387,7 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
   esp_websocket_client_handle_t client =
       esp_websocket_client_init(&ws_config);
   if (client == nullptr) {
+    vSemaphoreDelete(context.command_lock);
     vEventGroupDelete(context.events);
     return ESP_ERR_NO_MEM;
   }
@@ -403,6 +404,7 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
   err = esp_websocket_client_start(client);
   if (err != ESP_OK) {
     esp_websocket_client_destroy(client);
+    vSemaphoreDelete(context.command_lock);
     vEventGroupDelete(context.events);
     return err;
   }
