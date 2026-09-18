@@ -43,7 +43,7 @@ Pinned build inputs:
 - PlatformIO Core 6.2.0 in CI
 - platform-espressif32 7.1.3
 - ESP-IDF supplied by that platform
-- esp_dmx commit `9b6a5043add89038388d93ebe77109eb3368bb51`
+- esp_dmx compatibility fix commit `931d62c1ee6c9ddb0f5274e6da7808d3e923b6f0` from PR #223 (base: esp_dmx 4.1.0)
 
 Build:
 
@@ -88,3 +88,7 @@ brightness.
 
 The old HTTP endpoints (`/channel`, `/preset`, `/blackout`) are not part of
 the production protocol.
+
+## esp_dmx compatibility note
+
+The upstream esp_dmx 4.1.0 release does not compile against ESP-IDF 5.3+ because `uart_signal_conn_t.module` was removed. This repository pins the single-commit compatibility fix from esp_dmx PR #223, which maps UART ports to the corresponding `PERIPH_UARTx_MODULE` values for ESP-IDF 5 while leaving the IDF 4 path unchanged. The PR reports DMX output verified on ESP32-D0WDQ6, UART2 / GPIO17, ESP-IDF 5.5.2.
