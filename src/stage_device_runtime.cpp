@@ -5,6 +5,7 @@
 #include <string>
 
 #include "cJSON.h"
+#include "command_contract.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -13,6 +14,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 
 #ifndef STAGECORE_FW_VERSION
 #define STAGECORE_FW_VERSION "0.2.0-dev"
@@ -28,15 +30,20 @@ constexpr EventBits_t kConnectedBit = BIT0;
 constexpr EventBits_t kReadyBit = BIT1;
 constexpr EventBits_t kDisconnectedBit = BIT2;
 constexpr EventBits_t kProtocolErrorBit = BIT3;
+constexpr EventBits_t kCommandBit = BIT4;
 constexpr size_t kMaxInboundBytes = 8192;
 constexpr int kReadyTimeoutMS = 5000;
 constexpr int kHeartbeatMS = 10000;
 
 struct RuntimeContext {
   EventGroupHandle_t events = nullptr;
+  SemaphoreHandle_t command_lock = nullptr;
   std::string device_id;
+  std::string project_id;
   std::string inbound;
+  std::string pending_command_frame;
   int expected_payload = 0;
+  CommandDedupeCache dedupe;
 };
 
 const char *reset_reason_name(esp_reset_reason_t reason) {
@@ -193,11 +200,20 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
          std::strcmp(protocol->valuestring, kProtocolVersion) == 0;
     if (ok) xEventGroupSetBits(context->events, kReadyBit);
   } else if (ok && std::strcmp(type->valuestring, "command.execute") == 0) {
-    // Slice 1 has no execution authority. Disconnecting causes StageCore to
-    // terminalize an in-flight command as transport-interrupted instead of
-    // silently applying or acknowledging unsupported work.
-    ESP_LOGE(kTag, "command received before Firmware Slice 2; fail closed");
-    ok = false;
+    if (context->command_lock == nullptr ||
+        xSemaphoreTake(context->command_lock, 0) != pdTRUE) {
+      ESP_LOGE(kTag, "command queue lock unavailable");
+      ok = false;
+    } else {
+      if (!context->pending_command_frame.empty()) {
+        ESP_LOGE(kTag, "command queue overflow; fail closed");
+        ok = false;
+      } else {
+        context->pending_command_frame = text;
+        xEventGroupSetBits(context->events, kCommandBit);
+      }
+      xSemaphoreGive(context->command_lock);
+    }
   } else {
     ESP_LOGE(kTag, "unexpected Stage Device runtime frame");
     ok = false;
@@ -275,6 +291,50 @@ esp_err_t send_text(esp_websocket_client_handle_t client,
   return sent == static_cast<int>(message.size()) ? ESP_OK : ESP_FAIL;
 }
 
+esp_err_t process_pending_command(RuntimeContext *context,
+                                  esp_websocket_client_handle_t client) {
+  if (context == nullptr || context->command_lock == nullptr ||
+      client == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  std::string frame;
+  if (xSemaphoreTake(context->command_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  frame.swap(context->pending_command_frame);
+  xSemaphoreGive(context->command_lock);
+  xEventGroupClearBits(context->events, kCommandBit);
+
+  if (frame.empty()) return ESP_OK;
+
+  CommandDecision decision;
+  esp_err_t err = evaluate_command_execute_frame(
+      frame, context->device_id, context->project_id,
+      &context->dedupe, &decision);
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "malformed command.execute frame; closing runtime");
+    return err;
+  }
+
+  if (decision.disposition == CommandDisposition::kDuplicate ||
+      decision.disposition == CommandDisposition::kRejected ||
+      decision.disposition == CommandDisposition::kTimedOut) {
+    return send_text(client, decision.terminal_result_json);
+  }
+
+  // The envelope is canonical and timely, but this bounded sub-slice has not
+  // enabled payload execution yet. Return an explicit terminal rejection and
+  // remember it so the same command_id can never execute on retry.
+  const std::string result = make_command_result(
+      context->device_id, decision.command.command_id, "REJECTED",
+      "DEVICE_COMMAND_NOT_IMPLEMENTED", "CAPABILITY",
+      "Lighting payload execution is not enabled in this firmware slice",
+      false);
+  context->dedupe.Remember(decision.command.command_id, result);
+  return send_text(client, result);
+}
+
 }  // namespace
 
 esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
@@ -289,8 +349,14 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
 
   RuntimeContext context;
   context.events = xEventGroupCreate();
+  context.command_lock = xSemaphoreCreateMutex();
   context.device_id = identity.device_id();
-  if (context.events == nullptr) return ESP_ERR_NO_MEM;
+  context.project_id = config.project_id;
+  if (context.events == nullptr || context.command_lock == nullptr) {
+    if (context.command_lock != nullptr) vSemaphoreDelete(context.command_lock);
+    if (context.events != nullptr) vEventGroupDelete(context.events);
+    return ESP_ERR_NO_MEM;
+  }
 
   char uri[192];
   std::snprintf(uri, sizeof(uri),
@@ -329,6 +395,7 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
       client, WEBSOCKET_EVENT_ANY, &runtime_event_handler, &context);
   if (err != ESP_OK) {
     esp_websocket_client_destroy(client);
+    vSemaphoreDelete(context.command_lock);
     vEventGroupDelete(context.events);
     return err;
   }
@@ -368,11 +435,12 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
 
   ESP_LOGI(kTag, "Stage Device runtime.ready accepted");
   ESP_LOGW(kTag,
-           "Slice 1 runtime is BLOCKER/FAILSAFE; command execution disabled");
+           "Slice 2 validation active; lighting payload execution disabled");
 
   while (true) {
     bits = xEventGroupWaitBits(
-        context.events, kDisconnectedBit | kProtocolErrorBit,
+        context.events,
+        kDisconnectedBit | kProtocolErrorBit | kCommandBit,
         pdFALSE, pdFALSE, pdMS_TO_TICKS(kHeartbeatMS));
     if (bits & kProtocolErrorBit) {
       err = ESP_ERR_INVALID_RESPONSE;
@@ -386,6 +454,11 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
       err = ESP_ERR_INVALID_STATE;
       break;
     }
+    if (bits & kCommandBit) {
+      err = process_pending_command(&context, client);
+      if (err != ESP_OK) break;
+      continue;
+    }
 
     const std::string observation = make_observation(hub, identity);
     err = send_text(client, observation);
@@ -397,6 +470,7 @@ cleanup:
     (void)esp_websocket_client_stop(client);
   }
   esp_websocket_client_destroy(client);
+  vSemaphoreDelete(context.command_lock);
   vEventGroupDelete(context.events);
   return err;
 }
