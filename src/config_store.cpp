@@ -13,6 +13,9 @@ constexpr char kSSIDKey[] = "wifi_ssid";
 constexpr char kPasswordKey[] = "wifi_pass";
 constexpr char kProjectKey[] = "project_id";
 constexpr char kDisplayKey[] = "display_name";
+constexpr char kHubIDKey[] = "hub_id";
+constexpr char kHubFingerprintKey[] = "hub_fp";
+constexpr char kHubTLSKey[] = "hub_tls";
 
 esp_err_t read_string(nvs_handle_t handle, const char *key, std::string *value) {
   size_t length = 0;
@@ -78,6 +81,46 @@ esp_err_t save_device_config(const DeviceConfig &config) {
   if (err == ESP_OK) err = write_string(handle, kPasswordKey, config.wifi_password);
   if (err == ESP_OK) err = write_string(handle, kProjectKey, config.project_id);
   if (err == ESP_OK) err = write_string(handle, kDisplayKey, config.display_name);
+  if (err == ESP_OK) err = nvs_commit(handle);
+  nvs_close(handle);
+  return err;
+}
+
+bool HubBinding::complete() const {
+  return hub_id.size() == 36 && !fingerprint.empty() && tls_sha256.size() == 64;
+}
+
+esp_err_t load_hub_binding(HubBinding *binding) {
+  if (binding == nullptr) return ESP_ERR_INVALID_ARG;
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(kNamespace, NVS_READONLY, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    *binding = HubBinding{};
+    return ESP_OK;
+  }
+  if (err != ESP_OK) return err;
+
+  HubBinding loaded;
+  err = read_string(handle, kHubIDKey, &loaded.hub_id);
+  if (err == ESP_OK) err = read_string(handle, kHubFingerprintKey, &loaded.fingerprint);
+  if (err == ESP_OK) err = read_string(handle, kHubTLSKey, &loaded.tls_sha256);
+  nvs_close(handle);
+
+  if (err == ESP_OK) *binding = std::move(loaded);
+  return err;
+}
+
+esp_err_t save_hub_binding(const HubBinding &binding) {
+  if (!binding.complete()) return ESP_ERR_INVALID_ARG;
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &handle);
+  if (err != ESP_OK) return err;
+
+  err = write_string(handle, kHubIDKey, binding.hub_id);
+  if (err == ESP_OK) err = write_string(handle, kHubFingerprintKey, binding.fingerprint);
+  if (err == ESP_OK) err = write_string(handle, kHubTLSKey, binding.tls_sha256);
   if (err == ESP_OK) err = nvs_commit(handle);
   nvs_close(handle);
   return err;
