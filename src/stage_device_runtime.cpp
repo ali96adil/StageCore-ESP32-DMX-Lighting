@@ -641,11 +641,11 @@ esp_err_t process_pending_command(RuntimeContext *context,
     const esp_err_t fade_err = lighting_channels_fade(
         decision.command.command_id, payload.channels, payload.fade_ms,
         &normalized, &fade_error);
-    const esp_err_t event_err =
-        flush_lighting_events(context, client);
-    if (event_err != ESP_OK) return event_err;
 
     if (fade_err != ESP_OK) {
+      const esp_err_t event_err =
+          flush_lighting_events(context, client);
+      if (event_err != ESP_OK) return event_err;
       const bool configuration_missing =
           fade_err == ESP_ERR_INVALID_STATE;
       const bool invalid_channel =
@@ -669,7 +669,9 @@ esp_err_t process_pending_command(RuntimeContext *context,
         "", "", "", false);
     note_command_accepted(context, decision.command.command_id);
     context->dedupe.Remember(decision.command.command_id, accepted);
-    return send_text(client, accepted);
+    const esp_err_t accepted_err = send_text(client, accepted);
+    if (accepted_err != ESP_OK) return accepted_err;
+    return flush_lighting_events(context, client);
   }
 
   if (decision.command.command_type == "LIGHTING_BLACKOUT") {
@@ -677,11 +679,11 @@ esp_err_t process_pending_command(RuntimeContext *context,
       std::string fade_error;
       const esp_err_t fade_err = lighting_blackout_fade(
           decision.command.command_id, payload.fade_ms, &fade_error);
-      const esp_err_t event_err =
-          flush_lighting_events(context, client);
-      if (event_err != ESP_OK) return event_err;
 
       if (fade_err != ESP_OK) {
+        const esp_err_t event_err =
+            flush_lighting_events(context, client);
+        if (event_err != ESP_OK) return event_err;
         const bool configuration_missing =
             fade_err == ESP_ERR_INVALID_STATE;
         const std::string result = make_command_result(
@@ -700,7 +702,9 @@ esp_err_t process_pending_command(RuntimeContext *context,
           "", "", "", false);
       note_command_accepted(context, decision.command.command_id);
       context->dedupe.Remember(decision.command.command_id, accepted);
-      return send_text(client, accepted);
+      const esp_err_t accepted_err = send_text(client, accepted);
+      if (accepted_err != ESP_OK) return accepted_err;
+      return flush_lighting_events(context, client);
     }
 
     const esp_err_t output_err = lighting_blackout(false);
@@ -733,11 +737,11 @@ esp_err_t process_pending_command(RuntimeContext *context,
     const esp_err_t identify_err = lighting_identify(
         decision.command.command_id, payload.channel_key, payload.level,
         payload.duration_ms, &identify_error);
-    const esp_err_t event_err =
-        flush_lighting_events(context, client);
-    if (event_err != ESP_OK) return event_err;
 
     if (identify_err != ESP_OK) {
+      const esp_err_t event_err =
+          flush_lighting_events(context, client);
+      if (event_err != ESP_OK) return event_err;
       const bool configuration_missing =
           identify_err == ESP_ERR_INVALID_STATE;
       const bool invalid_channel =
@@ -761,7 +765,9 @@ esp_err_t process_pending_command(RuntimeContext *context,
         "", "", "", false);
     note_command_accepted(context, decision.command.command_id);
     context->dedupe.Remember(decision.command.command_id, accepted);
-    return send_text(client, accepted);
+    const esp_err_t accepted_err = send_text(client, accepted);
+    if (accepted_err != ESP_OK) return accepted_err;
+    return flush_lighting_events(context, client);
   }
 
   if (decision.command.command_type == "LIGHTING_STATE_READ") {
