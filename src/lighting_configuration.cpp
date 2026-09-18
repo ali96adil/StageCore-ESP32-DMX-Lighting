@@ -51,6 +51,22 @@ struct ActiveFadeInternal {
 ActiveFadeInternal g_fade;
 uint32_t g_next_fade_generation = 1;
 
+struct ActiveIdentifyInternal {
+  bool active = false;
+  uint32_t generation = 0;
+  std::string command_id;
+  int64_t started_us = 0;
+  int64_t duration_ms = 0;
+  std::string channel_key;
+  double requested_level = 0;
+  double previous_level = 0;
+  uint8_t channel_number = 0;
+  uint8_t restore_value = 0;
+};
+
+ActiveIdentifyInternal g_identify;
+uint32_t g_next_identify_generation = 1;
+
 esp_err_t ensure_lock() {
   if (g_lock == nullptr) g_lock = xSemaphoreCreateMutex();
   if (g_operation_lock == nullptr) g_operation_lock = xSemaphoreCreateMutex();
