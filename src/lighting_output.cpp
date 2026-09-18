@@ -163,20 +163,38 @@ esp_err_t lighting_output_apply_slots(
     seen[update.channel] = true;
   }
 
+  std::vector<DmxSlotValue> previous;
+  previous.reserve(updates.size());
+
   if (xSemaphoreTake(g_frame_lock, pdMS_TO_TICKS(25)) != pdTRUE) {
     return ESP_ERR_TIMEOUT;
   }
   for (const auto &update : updates) {
+    previous.push_back(DmxSlotValue{update.channel, g_frame[update.channel]});
     g_frame[update.channel] = update.value;
   }
   const uint32_t target = g_requested_generation.fetch_add(1) + 1;
   xSemaphoreGive(g_frame_lock);
 
-  if (!wait_for_generation(target, kApplyTimeout)) {
-    g_healthy.store(false);
-    return ESP_ERR_TIMEOUT;
+  const bool sent =
+      wait_for_generation(target, kApplyTimeout) && g_healthy.load();
+  if (sent) return ESP_OK;
+
+  g_healthy.store(false);
+
+  // A command that was reported FAILED must not remain staged for a later
+  // refresh. Restore the exact previous slot values and request a rollback
+  // generation. This is best-effort if the bus itself is unhealthy.
+  if (xSemaphoreTake(g_frame_lock, pdMS_TO_TICKS(25)) == pdTRUE) {
+    for (const auto &entry : previous) {
+      g_frame[entry.channel] = entry.value;
+    }
+    const uint32_t rollback =
+        g_requested_generation.fetch_add(1) + 1;
+    xSemaphoreGive(g_frame_lock);
+    (void)wait_for_generation(rollback, kApplyTimeout);
   }
-  return g_healthy.load() ? ESP_OK : ESP_FAIL;
+  return ESP_ERR_TIMEOUT;
 }
 
 esp_err_t lighting_output_blackout_immediate() {
