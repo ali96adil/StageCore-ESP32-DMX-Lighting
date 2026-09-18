@@ -10,8 +10,10 @@
 #include <utility>
 #include <vector>
 
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "lighting_output.h"
 #include "nvs.h"
 #include "sha/sha_core.h"
@@ -25,17 +27,36 @@ constexpr size_t kMaxStoredConfig = 8192;
 constexpr size_t kPhysicalChannels = 12;
 
 SemaphoreHandle_t g_lock = nullptr;
+SemaphoreHandle_t g_operation_lock = nullptr;
+TaskHandle_t g_fade_task = nullptr;
 bool g_ready = false;
 std::vector<LightingChannelConfigV1> g_configuration;
 std::vector<ChannelLevelV1> g_levels;
 std::string g_canonical;
 std::string g_hash;
 std::string g_authority = "FAILSAFE";
+std::vector<LightingCommandEvent> g_events;
+
+struct ActiveFadeInternal {
+  bool active = false;
+  uint32_t generation = 0;
+  std::string command_id;
+  int64_t started_us = 0;
+  int64_t duration_ms = 0;
+  std::vector<ChannelLevelV1> from;
+  std::vector<ChannelLevelV1> targets;
+  bool blackout = false;
+};
+
+ActiveFadeInternal g_fade;
+uint32_t g_next_fade_generation = 1;
 
 esp_err_t ensure_lock() {
-  if (g_lock != nullptr) return ESP_OK;
-  g_lock = xSemaphoreCreateMutex();
-  return g_lock != nullptr ? ESP_OK : ESP_ERR_NO_MEM;
+  if (g_lock == nullptr) g_lock = xSemaphoreCreateMutex();
+  if (g_operation_lock == nullptr) g_operation_lock = xSemaphoreCreateMutex();
+  return g_lock != nullptr && g_operation_lock != nullptr
+             ? ESP_OK
+             : ESP_ERR_NO_MEM;
 }
 
 std::string json_escape(const std::string &value) {
