@@ -6,6 +6,7 @@ idf_component_register(
         "hub_discovery.cpp"
         "hub_security.cpp"
         "provisioning.cpp"
+        "stage_device_runtime.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         esp_event
@@ -13,7 +14,9 @@ idf_component_register(
         esp_http_server
         esp-tls
         esp_netif
+        esp_timer
         esp_wifi
+        esp_websocket_client
         json
         mbedtls
         mdns
