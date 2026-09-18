@@ -1,6 +1,3 @@
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <string>
 
 #include "config_store.h"
@@ -19,6 +16,25 @@
 #ifndef STAGECORE_FW_VERSION
 #define STAGECORE_FW_VERSION "0.2.0-dev"
 #endif
+
+namespace {
+
+const char *kTag = "stagecore-light";
+
+void init_nvs() {
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+      err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    err = nvs_flash_init();
+  }
+  ESP_ERROR_CHECK(err);
+}
+
+[[noreturn]] void hold_safe_failure(const char *reason) {
+  ESP_LOGE(kTag, "safe failure: %s", reason);
+  while (true) vTaskDelay(pdMS_TO_TICKS(1000));
+}
 
 std::string default_display_name(const std::string &device_id) {
   std::string suffix;
