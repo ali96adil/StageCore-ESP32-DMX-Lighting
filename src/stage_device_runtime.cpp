@@ -718,6 +718,42 @@ esp_err_t process_pending_command(RuntimeContext *context,
     return send_text(client, result);
   }
 
+  if (decision.command.command_type == "LIGHTING_IDENTIFY") {
+    std::string identify_error;
+    const esp_err_t identify_err = lighting_identify(
+        decision.command.command_id, payload.channel_key, payload.level,
+        payload.duration_ms, &identify_error);
+    const esp_err_t event_err =
+        flush_lighting_events(context, client);
+    if (event_err != ESP_OK) return event_err;
+
+    if (identify_err != ESP_OK) {
+      const bool configuration_missing =
+          identify_err == ESP_ERR_INVALID_STATE;
+      const bool invalid_channel =
+          identify_err == ESP_ERR_NOT_FOUND;
+      const std::string result = make_command_result(
+          context->device_id, decision.command.command_id,
+          (configuration_missing || invalid_channel) ? "REJECTED" : "FAILED",
+          configuration_missing ? "DEVICE_CONFIGURATION_REQUIRED"
+                                : (invalid_channel ? "CHANNEL_INVALID"
+                                                   : "DMX_OUTPUT_FAILED"),
+          configuration_missing ? "CONFIGURATION"
+                                : (invalid_channel ? "VALIDATION" : "DEVICE"),
+          identify_error.c_str(),
+          configuration_missing || !invalid_channel);
+      context->dedupe.Remember(decision.command.command_id, result);
+      return send_text(client, result);
+    }
+
+    const std::string accepted = make_command_result(
+        context->device_id, decision.command.command_id, "ACCEPTED",
+        "", "", "", false);
+    note_command_accepted(context, decision.command.command_id);
+    context->dedupe.Remember(decision.command.command_id, accepted);
+    return send_text(client, accepted);
+  }
+
   if (decision.command.command_type == "LIGHTING_STATE_READ") {
     note_command_applied(context, decision.command.command_id);
     cJSON *state = observed_state_json(context);
@@ -842,7 +878,7 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
 
   ESP_LOGI(kTag, "Stage Device runtime.ready accepted");
   ESP_LOGW(kTag,
-           "Slice 2 runtime active; set/fade/blackout/state/config enabled, identify gated");
+           "Slice 2 runtime active; all seven lighting capabilities enabled");
 
   last_heartbeat_us = esp_timer_get_time();
   while (true) {
