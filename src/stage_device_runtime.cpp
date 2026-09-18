@@ -507,7 +507,7 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
 
   ESP_LOGI(kTag, "Stage Device runtime.ready accepted");
   ESP_LOGW(kTag,
-           "Slice 2 validation active; lighting payload execution disabled");
+           "Slice 2 validation active; immediate blackout enabled, other execution gated");
 
   while (true) {
     bits = xEventGroupWaitBits(
