@@ -7,6 +7,7 @@ idf_component_register(
         "hub_discovery.cpp"
         "hub_security.cpp"
         "lighting_contract.cpp"
+        "lighting_configuration.cpp"
         "lighting_output.cpp"
         "provisioning.cpp"
         "stage_device_runtime.cpp"
