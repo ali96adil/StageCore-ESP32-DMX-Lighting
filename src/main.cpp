@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "hub_discovery.h"
 #include "hub_security.h"
+#include "lighting_configuration.h"
 #include "lighting_output.h"
 #include "nvs_flash.h"
 #include "provisioning.h"
@@ -60,6 +61,15 @@ extern "C" void app_main(void) {
     hold_safe_failure("DMX task startup failed");
   }
 
+  const esp_err_t lighting_config_err =
+      stagecore::lighting_configuration_init();
+  if (lighting_config_err != ESP_OK) {
+    ESP_LOGW(kTag,
+             "stored lighting configuration unavailable (%s); "
+             "physical-zero failsafe retained until CONFIG_APPLY",
+             esp_err_to_name(lighting_config_err));
+  }
+
   stagecore::DeviceIdentity identity;
   if (identity.LoadOrCreate() != ESP_OK) {
     hold_safe_failure("persistent P-256 identity unavailable");
@@ -109,8 +119,14 @@ extern "C" void app_main(void) {
 
     const esp_err_t runtime_err = stagecore::run_stage_device_runtime(
         hub, credential, identity, config);
+    const esp_err_t failsafe_err = stagecore::lighting_blackout(true);
+    if (failsafe_err != ESP_OK) {
+      ESP_LOGE(kTag, "failsafe blackout failed after runtime exit: %s",
+               esp_err_to_name(failsafe_err));
+    }
     ESP_LOGW(kTag,
-             "Stage Device runtime ended (%s); re-authenticating, blackout held",
+             "Stage Device runtime ended (%s); failsafe blackout requested "
+             "before re-authentication",
              esp_err_to_name(runtime_err));
     credential = stagecore::RuntimeCredential{};
     vTaskDelay(pdMS_TO_TICKS(2000));
