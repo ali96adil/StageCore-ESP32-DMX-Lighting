@@ -831,13 +831,15 @@ esp_err_t lighting_configuration_apply(
   }
 
   bool old_ready = false;
+  bool had_identify = false;
+  DmxSlotValue identify_restore{};
   std::vector<LightingChannelConfigV1> old_configuration;
   if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
     old_ready = g_ready;
     old_configuration = g_configuration;
     cancel_active_locked("superseded by configuration apply", true);
-    (void)cancel_identify_locked(
-        "superseded by configuration apply", true, nullptr);
+    had_identify = cancel_identify_locked(
+        "superseded by configuration apply", true, &identify_restore);
     xSemaphoreGive(g_lock);
   } else {
     xSemaphoreGive(g_operation_lock);
@@ -848,6 +850,9 @@ esp_err_t lighting_configuration_apply(
   // blackout has been physically confirmed.
   err = lighting_output_apply_slots(blackout_slots(configuration));
   if (err != ESP_OK) {
+    if (had_identify) {
+      (void)lighting_output_apply_slots({identify_restore});
+    }
     xSemaphoreGive(g_operation_lock);
     return err;
   }
@@ -986,6 +991,8 @@ esp_err_t lighting_blackout(bool failsafe) {
   }
 
   bool ready = false;
+  bool had_identify = false;
+  DmxSlotValue identify_restore{};
   std::vector<LightingChannelConfigV1> configuration;
   if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
     xSemaphoreGive(g_operation_lock);
@@ -994,8 +1001,8 @@ esp_err_t lighting_blackout(bool failsafe) {
   ready = g_ready;
   configuration = g_configuration;
   cancel_active_locked("superseded by blackout", !failsafe);
-  (void)cancel_identify_locked(
-      "superseded by blackout", !failsafe, nullptr);
+  had_identify = cancel_identify_locked(
+      "superseded by blackout", !failsafe, &identify_restore);
   if (failsafe) g_events.clear();
   xSemaphoreGive(g_lock);
 
@@ -1003,6 +1010,9 @@ esp_err_t lighting_blackout(bool failsafe) {
       ? lighting_output_apply_slots(blackout_slots(configuration))
       : lighting_output_blackout_immediate();
   if (err != ESP_OK) {
+    if (had_identify) {
+      (void)lighting_output_apply_slots({identify_restore});
+    }
     xSemaphoreGive(g_operation_lock);
     return err;
   }
