@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,7 @@ struct Candidate {
 
 struct HttpBody {
   std::string body;
+  std::string date_header;
 };
 
 bool valid_uuid_shape(const std::string &value) {
@@ -197,9 +199,13 @@ esp_err_t capture_pinned_certificate(const Candidate &candidate,
 
 esp_err_t http_event(esp_http_client_event_t *event) {
   if (event == nullptr || event->user_data == nullptr) return ESP_OK;
-  if (event->event_id == HTTP_EVENT_ON_DATA && event->data != nullptr &&
-      event->data_len > 0) {
-    auto *body = static_cast<HttpBody *>(event->user_data);
+  auto *body = static_cast<HttpBody *>(event->user_data);
+  if (event->event_id == HTTP_EVENT_ON_HEADER &&
+      event->header_key != nullptr && event->header_value != nullptr &&
+      strcasecmp(event->header_key, "Date") == 0) {
+    body->date_header = event->header_value;
+  } else if (event->event_id == HTTP_EVENT_ON_DATA &&
+             event->data != nullptr && event->data_len > 0) {
     if (body->body.size() + static_cast<size_t>(event->data_len) > 8192) {
       return ESP_ERR_NO_MEM;
     }
@@ -237,11 +243,9 @@ esp_err_t verify_public_identity(const Candidate &candidate,
   const int status = esp_http_client_get_status_code(client);
 
   if (performed == ESP_OK && status == 200) {
-    char *date_header = nullptr;
-    if (esp_http_client_get_header(client, "Date", &date_header) == ESP_OK &&
-        date_header != nullptr) {
+    if (!body.date_header.empty()) {
       const esp_err_t clock_err =
-          update_trusted_clock_from_http_date(date_header);
+          update_trusted_clock_from_http_date(body.date_header.c_str());
       if (clock_err == ESP_OK) {
         ESP_LOGI(kTag, "trusted UTC synchronized from verified Hub");
       } else {
