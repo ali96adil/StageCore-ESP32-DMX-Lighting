@@ -20,6 +20,10 @@ class DeviceIdentity {
   const std::string &device_id() const { return device_id_; }
   const std::string &public_key_base64() const { return public_key_base64_; }
 
+  esp_err_t SignAuthenticationMessage(const std::string &challenge_id,
+                                      const std::string &nonce_base64,
+                                      std::string *signature_base64);
+
  private:
   esp_err_t LoadOrCreateDeviceID();
   esp_err_t LoadOrCreateKey();
