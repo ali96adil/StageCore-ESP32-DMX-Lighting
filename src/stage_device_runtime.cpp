@@ -6,6 +6,8 @@
 
 #include "cJSON.h"
 #include "command_contract.h"
+#include "lighting_contract.h"
+#include "lighting_output.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -63,10 +65,15 @@ const char *reset_reason_name(esp_reset_reason_t reason) {
 }
 
 cJSON *capabilities_json() {
-  // Slice 1 intentionally advertises no executable runtime capabilities.
-  // Firmware Slice 2 will advertise the seven lighting capabilities only
-  // after their command handlers, deadlines, dedupe, fades and failsafe exist.
-  return cJSON_CreateArray();
+  cJSON *array = cJSON_CreateArray();
+  if (array == nullptr) return nullptr;
+  cJSON *blackout = cJSON_CreateString("lighting.blackout");
+  if (blackout == nullptr || !cJSON_AddItemToArray(array, blackout)) {
+    if (blackout != nullptr) cJSON_Delete(blackout);
+    cJSON_Delete(array);
+    return nullptr;
+  }
+  return array;
 }
 
 cJSON *observed_state_json() {
@@ -92,7 +99,8 @@ cJSON *observed_state_json() {
     return nullptr;
   }
   cJSON_AddItemToObject(state, "current_levels", levels);
-  cJSON_AddBoolToObject(state, "dmx_healthy", true);
+  cJSON_AddBoolToObject(state, "dmx_healthy",
+                        lighting_output_dmx_healthy());
   cJSON_AddBoolToObject(state, "brownout_warning", false);
   cJSON_AddStringToObject(state, "authority", "FAILSAFE");
   return state;
@@ -323,13 +331,75 @@ esp_err_t process_pending_command(RuntimeContext *context,
     return send_text(client, decision.terminal_result_json);
   }
 
-  // The envelope is canonical and timely, but this bounded sub-slice has not
-  // enabled payload execution yet. Return an explicit terminal rejection and
-  // remember it so the same command_id can never execute on retry.
+  LightingPayloadV1 payload;
+  std::string payload_error;
+  if (validate_lighting_payload(decision.command, &payload,
+                                &payload_error) != ESP_OK) {
+    const std::string result = make_command_result(
+        context->device_id, decision.command.command_id, "REJECTED",
+        "DEVICE_COMMAND_INVALID", "VALIDATION",
+        payload_error.c_str(), false);
+    context->dedupe.Remember(decision.command.command_id, result);
+    return send_text(client, result);
+  }
+
+  if (decision.command.command_type == "LIGHTING_BLACKOUT") {
+    if (payload.fade_ms != 0) {
+      const std::string result = make_command_result(
+          context->device_id, decision.command.command_id, "REJECTED",
+          "DEVICE_COMMAND_NOT_IMPLEMENTED", "CAPABILITY",
+          "Faded blackout is not enabled in this firmware slice", false);
+      context->dedupe.Remember(decision.command.command_id, result);
+      return send_text(client, result);
+    }
+
+    const esp_err_t output_err = lighting_output_blackout_immediate();
+    if (output_err != ESP_OK) {
+      const std::string result = make_command_result(
+          context->device_id, decision.command.command_id, "FAILED",
+          "DMX_OUTPUT_FAILED", "DEVICE",
+          "DMX blackout frame was not confirmed on the output task", true);
+      context->dedupe.Remember(decision.command.command_id, result);
+      return send_text(client, result);
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (root == nullptr) return ESP_ERR_NO_MEM;
+    cJSON_AddStringToObject(root, "type", "command.result");
+    cJSON_AddNumberToObject(root, "schema_version", 1);
+    cJSON_AddStringToObject(root, "device_id", context->device_id.c_str());
+    cJSON_AddStringToObject(root, "command_id",
+                            decision.command.command_id.c_str());
+    cJSON_AddStringToObject(root, "status", "COMPLETED");
+    cJSON *result_payload = cJSON_CreateObject();
+    if (result_payload == nullptr) {
+      cJSON_Delete(root);
+      return ESP_ERR_NO_MEM;
+    }
+    cJSON_AddBoolToObject(result_payload, "blackout", true);
+    cJSON_AddNumberToObject(result_payload, "fade_ms", 0);
+    cJSON_AddItemToObject(root, "payload", result_payload);
+    const std::string result = print_json(root);
+    cJSON_Delete(root);
+    if (result.empty()) return ESP_FAIL;
+
+    context->dedupe.Remember(decision.command.command_id, result);
+    return send_text(client, result);
+  }
+
+  if (decision.command.command_type == "LIGHTING_CHANNELS_SET") {
+    const std::string result = make_command_result(
+        context->device_id, decision.command.command_id, "REJECTED",
+        "DEVICE_CONFIGURATION_REQUIRED", "CONFIGURATION",
+        "No validated channel configuration is installed yet", true);
+    context->dedupe.Remember(decision.command.command_id, result);
+    return send_text(client, result);
+  }
+
   const std::string result = make_command_result(
       context->device_id, decision.command.command_id, "REJECTED",
       "DEVICE_COMMAND_NOT_IMPLEMENTED", "CAPABILITY",
-      "Lighting payload execution is not enabled in this firmware slice",
+      "Lighting command payload is valid but execution is not enabled yet",
       false);
   context->dedupe.Remember(decision.command.command_id, result);
   return send_text(client, result);
