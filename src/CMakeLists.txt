@@ -6,6 +6,8 @@ idf_component_register(
         "device_identity.cpp"
         "hub_discovery.cpp"
         "hub_security.cpp"
+        "lighting_contract.cpp"
+        "lighting_output.cpp"
         "provisioning.cpp"
         "stage_device_runtime.cpp"
         "trusted_clock.cpp"
