@@ -14,6 +14,7 @@
 #include "hub_security.h"
 #include "nvs_flash.h"
 #include "provisioning.h"
+#include "stage_device_runtime.h"
 
 #ifndef STAGECORE_FW_VERSION
 #define STAGECORE_FW_VERSION "0.2.0-dev"
@@ -144,26 +145,32 @@ extern "C" void app_main(void) {
   ESP_LOGI(kTag, "provisioned for project %s as %s",
            config.project_id.c_str(), config.display_name.c_str());
 
-  stagecore::VerifiedHub hub;
-  while (stagecore::discover_and_verify_hub(&hub) != ESP_OK) {
-    ESP_LOGW(kTag, "no verified StageCore Hub yet; DMX remains blackout");
-    vTaskDelay(pdMS_TO_TICKS(5000));
-  }
+  while (true) {
+    stagecore::VerifiedHub hub;
+    if (stagecore::discover_and_verify_hub(&hub) != ESP_OK) {
+      ESP_LOGW(kTag, "no verified StageCore Hub yet; DMX remains blackout");
+      vTaskDelay(pdMS_TO_TICKS(5000));
+      continue;
+    }
 
-  ESP_LOGI(kTag, "verified Hub %s (%s)",
-           hub.display_name.c_str(), hub.hub_id.c_str());
+    ESP_LOGI(kTag, "verified Hub %s (%s)",
+             hub.display_name.c_str(), hub.hub_id.c_str());
 
-  stagecore::RuntimeCredential credential;
-  while (stagecore::ensure_paired_and_authenticate(
-             hub, &identity, config.display_name, &credential) != ESP_OK) {
+    stagecore::RuntimeCredential credential;
+    if (stagecore::ensure_paired_and_authenticate(
+            hub, &identity, config.display_name, &credential) != ESP_OK) {
+      ESP_LOGW(kTag,
+               "StageCore pairing/auth unavailable; DMX remains blackout");
+      vTaskDelay(pdMS_TO_TICKS(5000));
+      continue;
+    }
+
+    const esp_err_t runtime_err = stagecore::run_stage_device_runtime(
+        hub, credential, identity, config);
     ESP_LOGW(kTag,
-             "StageCore pairing/auth unavailable; DMX remains blackout");
+             "Stage Device runtime ended (%s); re-authenticating, blackout held",
+             esp_err_to_name(runtime_err));
     credential = stagecore::RuntimeCredential{};
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    vTaskDelay(pdMS_TO_TICKS(2000));
   }
-
-  ESP_LOGI(kTag,
-           "authenticated runtime session ready; WebSocket is the next sub-slice");
-
-  while (true) vTaskDelay(pdMS_TO_TICKS(1000));
 }
