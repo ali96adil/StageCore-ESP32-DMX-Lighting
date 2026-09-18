@@ -10,6 +10,7 @@
 #include "mbedtls/base64.h"
 #include "mbedtls/ecp.h"
 #include "mbedtls/pk.h"
+#include "mbedtls/sha256.h"
 #include "nvs.h"
 
 namespace stagecore {
@@ -178,6 +179,51 @@ esp_err_t DeviceIdentity::RefreshPublicKey() {
 
   public_key_base64_.assign(reinterpret_cast<const char *>(base64.data()),
                             base64_length);
+  return ESP_OK;
+}
+
+esp_err_t DeviceIdentity::SignAuthenticationMessage(
+    const std::string &challenge_id, const std::string &nonce_base64,
+    std::string *signature_base64) {
+  if (signature_base64 == nullptr || device_id_.empty() ||
+      challenge_id.empty() || nonce_base64.empty()) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  const std::string message =
+      "StageCore Companion Authentication v1\n" + device_id_ + "\n" +
+      challenge_id + "\n" + nonce_base64;
+
+  std::array<unsigned char, 32> digest{};
+  if (mbedtls_sha256_ret(
+          reinterpret_cast<const unsigned char *>(message.data()),
+          message.size(), digest.data(), 0) != 0) {
+    return ESP_FAIL;
+  }
+
+  std::array<unsigned char, MBEDTLS_PK_SIGNATURE_MAX_SIZE> signature{};
+  size_t signature_length = 0;
+  auto *pk = static_cast<mbedtls_pk_context *>(pk_context_);
+  const int signed_rc = mbedtls_pk_sign(
+      pk, MBEDTLS_MD_SHA256, digest.data(), digest.size(), signature.data(),
+      signature.size(), &signature_length, random_bytes, nullptr);
+  if (signed_rc != 0 || signature_length == 0) {
+    ESP_LOGE(kTag, "P-256 auth signing failed: -0x%04x", -signed_rc);
+    return ESP_FAIL;
+  }
+
+  size_t base64_length = 0;
+  int rc = mbedtls_base64_encode(nullptr, 0, &base64_length,
+                                 signature.data(), signature_length);
+  if (rc != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL) return ESP_FAIL;
+
+  std::vector<unsigned char> base64(base64_length + 1, 0);
+  rc = mbedtls_base64_encode(base64.data(), base64.size(), &base64_length,
+                             signature.data(), signature_length);
+  if (rc != 0) return ESP_FAIL;
+
+  signature_base64->assign(
+      reinterpret_cast<const char *>(base64.data()), base64_length);
   return ESP_OK;
 }
 
