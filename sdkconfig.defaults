@@ -16,3 +16,9 @@ CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
 # captured DER certificate as the trust anchor.
 CONFIG_ESP_TLS_INSECURE=y
 CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+
+# Firmware exceeds the default 1 MiB app slot once secure discovery/TLS is linked.
+# ESP-IDF's built-in LARGE single-app table provides a 1500 KiB factory app and
+# is valid on flash devices 2 MiB or larger. Physical flash size is verified
+# separately before the first real flash.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
