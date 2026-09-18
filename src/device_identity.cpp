@@ -195,7 +195,7 @@ esp_err_t DeviceIdentity::SignAuthenticationMessage(
       challenge_id + "\n" + nonce_base64;
 
   std::array<unsigned char, 32> digest{};
-  if (mbedtls_sha256_ret(
+  if (mbedtls_sha256(
           reinterpret_cast<const unsigned char *>(message.data()),
           message.size(), digest.data(), 0) != 0) {
     return ESP_FAIL;
