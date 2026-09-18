@@ -877,8 +877,18 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
   }
 
   ESP_LOGI(kTag, "Stage Device runtime.ready accepted");
-  ESP_LOGW(kTag,
-           "Slice 2 runtime active; all seven lighting capabilities enabled");
+  lighting_runtime_authority_acquired();
+
+  {
+    const std::string observation =
+        make_observation(hub, identity, &context);
+    err = send_text(client, observation);
+    if (err != ESP_OK) goto cleanup;
+  }
+
+  ESP_LOGI(kTag,
+           "all seven lighting capabilities enabled; readiness=%s",
+           runtime_readiness());
 
   last_heartbeat_us = esp_timer_get_time();
   while (true) {
@@ -909,7 +919,8 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
     const int64_t now_us = esp_timer_get_time();
     if (now_us - last_heartbeat_us >=
         static_cast<int64_t>(kHeartbeatMS) * 1000LL) {
-      const std::string observation = make_observation(hub, identity);
+      const std::string observation =
+          make_observation(hub, identity, &context);
       err = send_text(client, observation);
       if (err != ESP_OK) break;
       last_heartbeat_us = now_us;
