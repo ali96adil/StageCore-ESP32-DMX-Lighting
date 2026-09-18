@@ -408,7 +408,9 @@ void fade_task(void *) {
     xSemaphoreGive(g_lock);
 
     const esp_err_t output_err =
-        valid ? lighting_output_apply_slots(updates) : ESP_ERR_INVALID_STATE;
+        !valid ? ESP_ERR_INVALID_STATE
+               : (updates.empty() ? ESP_OK
+                                  : lighting_output_apply_slots(updates));
 
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
       if (g_fade.active && g_fade.generation == fade.generation) {
@@ -450,7 +452,7 @@ esp_err_t start_fade_locked(
     bool blackout,
     std::vector<ChannelLevelV1> *normalized,
     std::string *error_message) {
-  if (command_id.empty() || targets.empty() || fade_ms <= 0 ||
+  if (command_id.empty() || (!blackout && targets.empty()) || fade_ms <= 0 ||
       normalized == nullptr || error_message == nullptr) {
     return ESP_ERR_INVALID_ARG;
   }
@@ -466,8 +468,10 @@ esp_err_t start_fade_locked(
 
   std::vector<DmxSlotValue> ignored_updates;
   std::vector<ChannelLevelV1> values;
-  if (!normalize_requested(g_configuration, targets, !blackout,
-                           &values, &ignored_updates, error_message)) {
+  if (blackout && targets.empty()) {
+    values.clear();
+  } else if (!normalize_requested(g_configuration, targets, !blackout,
+                                  &values, &ignored_updates, error_message)) {
     xSemaphoreGive(g_lock);
     return ESP_ERR_NOT_FOUND;
   }
