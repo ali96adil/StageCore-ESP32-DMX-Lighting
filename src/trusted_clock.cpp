@@ -3,7 +3,9 @@
 #include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <sys/time.h>
 
 namespace stagecore {
@@ -150,6 +152,28 @@ int64_t trusted_now_unix_ms() {
   if (gettimeofday(&tv, nullptr) != 0) return 0;
   return static_cast<int64_t>(tv.tv_sec) * 1000LL +
          static_cast<int64_t>(tv.tv_usec / 1000);
+}
+
+std::string format_rfc3339_utc_ms(int64_t unix_ms) {
+  if (unix_ms <= 0) return {};
+  time_t seconds = static_cast<time_t>(unix_ms / 1000LL);
+  int milliseconds = static_cast<int>(unix_ms % 1000LL);
+  if (milliseconds < 0) {
+    milliseconds += 1000;
+    --seconds;
+  }
+  tm utc{};
+  if (gmtime_r(&seconds, &utc) == nullptr) return {};
+  char buffer[40];
+  const int written = std::snprintf(
+      buffer, sizeof(buffer),
+      "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+      utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
+      utc.tm_hour, utc.tm_min, utc.tm_sec, milliseconds);
+  if (written <= 0 || static_cast<size_t>(written) >= sizeof(buffer)) {
+    return {};
+  }
+  return std::string(buffer, static_cast<size_t>(written));
 }
 
 bool parse_rfc3339_unix_ms(const std::string &value, int64_t *unix_ms) {
