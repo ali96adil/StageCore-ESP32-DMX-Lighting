@@ -4,6 +4,7 @@ idf_component_register(
         "config_store.cpp"
         "device_identity.cpp"
         "hub_discovery.cpp"
+        "hub_security.cpp"
         "provisioning.cpp"
     INCLUDE_DIRS "."
     REQUIRES
