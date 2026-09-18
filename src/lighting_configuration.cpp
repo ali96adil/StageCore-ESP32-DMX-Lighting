@@ -836,6 +836,8 @@ esp_err_t lighting_configuration_apply(
     old_ready = g_ready;
     old_configuration = g_configuration;
     cancel_active_locked("superseded by configuration apply", true);
+    (void)cancel_identify_locked(
+        "superseded by configuration apply", true, nullptr);
     xSemaphoreGive(g_lock);
   } else {
     xSemaphoreGive(g_operation_lock);
@@ -898,6 +900,14 @@ esp_err_t lighting_channels_set(
     return ESP_ERR_TIMEOUT;
   }
 
+  err = restore_identify_for_partial_operation(
+      "superseded by immediate channel set");
+  if (err != ESP_OK) {
+    *error_message = "Identify restore was not confirmed by the output task";
+    xSemaphoreGive(g_operation_lock);
+    return err;
+  }
+
   std::vector<LightingChannelConfigV1> configuration;
   if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
     xSemaphoreGive(g_operation_lock);
@@ -956,8 +966,14 @@ esp_err_t lighting_channels_fade(
   if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
     return ESP_ERR_TIMEOUT;
   }
-  err = start_fade_locked(command_id, requested, fade_ms, false,
-                          normalized, error_message);
+  err = restore_identify_for_partial_operation(
+      "superseded by newer fade");
+  if (err == ESP_OK) {
+    err = start_fade_locked(command_id, requested, fade_ms, false,
+                            normalized, error_message);
+  } else {
+    *error_message = "Identify restore was not confirmed by the output task";
+  }
   xSemaphoreGive(g_operation_lock);
   return err;
 }
@@ -978,6 +994,8 @@ esp_err_t lighting_blackout(bool failsafe) {
   ready = g_ready;
   configuration = g_configuration;
   cancel_active_locked("superseded by blackout", !failsafe);
+  (void)cancel_identify_locked(
+      "superseded by blackout", !failsafe, nullptr);
   if (failsafe) g_events.clear();
   xSemaphoreGive(g_lock);
 
@@ -1011,6 +1029,14 @@ esp_err_t lighting_blackout_fade(
   if (err != ESP_OK) return err;
   if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
     return ESP_ERR_TIMEOUT;
+  }
+
+  err = restore_identify_for_partial_operation(
+      "superseded by blackout");
+  if (err != ESP_OK) {
+    *error_message = "Identify restore was not confirmed by the output task";
+    xSemaphoreGive(g_operation_lock);
+    return err;
   }
 
   std::vector<ChannelLevelV1> targets;
