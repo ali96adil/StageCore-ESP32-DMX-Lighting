@@ -25,6 +25,10 @@ struct LightingCommandEvent {
   std::vector<ChannelLevelV1> levels;
   bool blackout = false;
   int64_t fade_ms = 0;
+  bool identify = false;
+  std::string channel_key;
+  double level = 0;
+  int64_t duration_ms = 0;
 };
 
 struct LightingActiveFade {
@@ -59,5 +63,14 @@ esp_err_t lighting_blackout_fade(
     const std::string &command_id,
     int64_t fade_ms,
     std::string *error_message);
+
+esp_err_t lighting_identify(
+    const std::string &command_id,
+    const std::string &channel_key,
+    double level,
+    int64_t duration_ms,
+    std::string *error_message);
+
+void lighting_runtime_authority_acquired();
 
 }  // namespace stagecore
