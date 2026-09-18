@@ -422,7 +422,13 @@ std::string lighting_event_result(
   if (event.status == "COMPLETED") {
     cJSON *payload = cJSON_CreateObject();
     if (payload == nullptr) return {};
-    if (event.blackout) {
+    if (event.identify) {
+      cJSON_AddStringToObject(payload, "channel_key",
+                              event.channel_key.c_str());
+      cJSON_AddNumberToObject(payload, "level", event.level);
+      cJSON_AddNumberToObject(payload, "duration_ms",
+                              static_cast<double>(event.duration_ms));
+    } else if (event.blackout) {
       cJSON_AddBoolToObject(payload, "blackout", true);
       cJSON_AddNumberToObject(payload, "fade_ms",
                               static_cast<double>(event.fade_ms));
@@ -456,6 +462,9 @@ esp_err_t flush_lighting_events(RuntimeContext *context,
     const std::string result =
         lighting_event_result(context->device_id, event);
     if (result.empty()) return ESP_FAIL;
+    if (event.status == "COMPLETED") {
+      context->last_applied_command_id = event.command_id;
+    }
     context->dedupe.Remember(event.command_id, result);
     const esp_err_t err = send_text(client, result);
     if (err != ESP_OK) return err;
