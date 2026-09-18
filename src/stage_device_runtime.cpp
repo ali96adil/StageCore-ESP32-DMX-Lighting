@@ -70,6 +70,7 @@ cJSON *capabilities_json() {
   if (array == nullptr) return nullptr;
   static constexpr const char *kCapabilities[] = {
       "lighting.channels.set",
+      "lighting.channels.fade",
       "lighting.blackout",
       "lighting.state.read",
       "lighting.config.read",
@@ -355,6 +356,53 @@ std::string levels_payload(
   return out;
 }
 
+std::string lighting_event_result(
+    const std::string &device_id,
+    const LightingCommandEvent &event) {
+  if (event.status == "COMPLETED") {
+    cJSON *payload = cJSON_CreateObject();
+    if (payload == nullptr) return {};
+    if (event.blackout) {
+      cJSON_AddBoolToObject(payload, "blackout", true);
+      cJSON_AddNumberToObject(payload, "fade_ms",
+                              static_cast<double>(event.fade_ms));
+    } else {
+      cJSON *levels = cJSON_CreateObject();
+      if (levels == nullptr) {
+        cJSON_Delete(payload);
+        return {};
+      }
+      for (const auto &entry : event.levels) {
+        cJSON_AddNumberToObject(levels, entry.channel_key.c_str(),
+                                entry.level);
+      }
+      cJSON_AddItemToObject(payload, "levels", levels);
+    }
+    return completed_result(device_id, event.command_id, payload);
+  }
+
+  return make_command_result(
+      device_id, event.command_id, event.status.c_str(),
+      event.error_code.c_str(), event.category.c_str(),
+      event.message.c_str(), false);
+}
+
+esp_err_t flush_lighting_events(RuntimeContext *context,
+                                esp_websocket_client_handle_t client) {
+  if (context == nullptr || client == nullptr) return ESP_ERR_INVALID_ARG;
+
+  LightingCommandEvent event;
+  while (lighting_pop_command_event(&event)) {
+    const std::string result =
+        lighting_event_result(context->device_id, event);
+    if (result.empty()) return ESP_FAIL;
+    context->dedupe.Remember(event.command_id, result);
+    const esp_err_t err = send_text(client, result);
+    if (err != ESP_OK) return err;
+  }
+  return ESP_OK;
+}
+
 esp_err_t process_pending_command(RuntimeContext *context,
                                   esp_websocket_client_handle_t client) {
   if (context == nullptr || context->command_lock == nullptr ||
@@ -404,6 +452,9 @@ esp_err_t process_pending_command(RuntimeContext *context,
     const esp_err_t apply_err =
         lighting_configuration_apply(payload.configuration,
                                      &configuration_hash);
+    const esp_err_t event_err =
+        flush_lighting_events(context, client);
+    if (event_err != ESP_OK) return event_err;
     if (apply_err != ESP_OK) {
       const std::string result = make_command_result(
           context->device_id, decision.command.command_id, "FAILED",
@@ -452,6 +503,9 @@ esp_err_t process_pending_command(RuntimeContext *context,
     std::string set_error;
     const esp_err_t set_err =
         lighting_channels_set(payload.channels, &normalized, &set_error);
+    const esp_err_t event_err =
+        flush_lighting_events(context, client);
+    if (event_err != ESP_OK) return event_err;
     if (set_err != ESP_OK) {
       const bool configuration_missing =
           set_err == ESP_ERR_INVALID_STATE;
@@ -484,17 +538,76 @@ esp_err_t process_pending_command(RuntimeContext *context,
     return send_text(client, result);
   }
 
-  if (decision.command.command_type == "LIGHTING_BLACKOUT") {
-    if (payload.fade_ms != 0) {
+  if (decision.command.command_type == "LIGHTING_CHANNELS_FADE") {
+    std::vector<ChannelLevelV1> normalized;
+    std::string fade_error;
+    const esp_err_t fade_err = lighting_channels_fade(
+        decision.command.command_id, payload.channels, payload.fade_ms,
+        &normalized, &fade_error);
+    const esp_err_t event_err =
+        flush_lighting_events(context, client);
+    if (event_err != ESP_OK) return event_err;
+
+    if (fade_err != ESP_OK) {
+      const bool configuration_missing =
+          fade_err == ESP_ERR_INVALID_STATE;
+      const bool invalid_channel =
+          fade_err == ESP_ERR_NOT_FOUND;
       const std::string result = make_command_result(
-          context->device_id, decision.command.command_id, "REJECTED",
-          "DEVICE_COMMAND_NOT_IMPLEMENTED", "CAPABILITY",
-          "Faded blackout is not enabled in this firmware slice", false);
+          context->device_id, decision.command.command_id,
+          (configuration_missing || invalid_channel) ? "REJECTED" : "FAILED",
+          configuration_missing ? "DEVICE_CONFIGURATION_REQUIRED"
+                                : (invalid_channel ? "CHANNEL_LEVEL_INVALID"
+                                                   : "DMX_OUTPUT_FAILED"),
+          configuration_missing ? "CONFIGURATION"
+                                : (invalid_channel ? "VALIDATION" : "DEVICE"),
+          fade_error.c_str(),
+          configuration_missing || !invalid_channel);
       context->dedupe.Remember(decision.command.command_id, result);
       return send_text(client, result);
     }
 
+    const std::string accepted = make_command_result(
+        context->device_id, decision.command.command_id, "ACCEPTED",
+        "", "", "", false);
+    context->dedupe.Remember(decision.command.command_id, accepted);
+    return send_text(client, accepted);
+  }
+
+  if (decision.command.command_type == "LIGHTING_BLACKOUT") {
+    if (payload.fade_ms > 0) {
+      std::string fade_error;
+      const esp_err_t fade_err = lighting_blackout_fade(
+          decision.command.command_id, payload.fade_ms, &fade_error);
+      const esp_err_t event_err =
+          flush_lighting_events(context, client);
+      if (event_err != ESP_OK) return event_err;
+
+      if (fade_err != ESP_OK) {
+        const bool configuration_missing =
+            fade_err == ESP_ERR_INVALID_STATE;
+        const std::string result = make_command_result(
+            context->device_id, decision.command.command_id,
+            configuration_missing ? "REJECTED" : "FAILED",
+            configuration_missing ? "DEVICE_CONFIGURATION_REQUIRED"
+                                  : "DMX_OUTPUT_FAILED",
+            configuration_missing ? "CONFIGURATION" : "DEVICE",
+            fade_error.c_str(), true);
+        context->dedupe.Remember(decision.command.command_id, result);
+        return send_text(client, result);
+      }
+
+      const std::string accepted = make_command_result(
+          context->device_id, decision.command.command_id, "ACCEPTED",
+          "", "", "", false);
+      context->dedupe.Remember(decision.command.command_id, accepted);
+      return send_text(client, accepted);
+    }
+
     const esp_err_t output_err = lighting_blackout(false);
+    const esp_err_t event_err =
+        flush_lighting_events(context, client);
+    if (event_err != ESP_OK) return event_err;
     if (output_err != ESP_OK) {
       const std::string result = make_command_result(
           context->device_id, decision.command.command_id, "FAILED",
@@ -636,13 +749,14 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
 
   ESP_LOGI(kTag, "Stage Device runtime.ready accepted");
   ESP_LOGW(kTag,
-           "Slice 2 runtime active; set/blackout/state/config enabled, fade/identify gated");
+           "Slice 2 runtime active; set/fade/blackout/state/config enabled, identify gated");
 
+  int64_t last_heartbeat_us = esp_timer_get_time();
   while (true) {
     bits = xEventGroupWaitBits(
         context.events,
         kDisconnectedBit | kProtocolErrorBit | kCommandBit,
-        pdFALSE, pdFALSE, pdMS_TO_TICKS(kHeartbeatMS));
+        pdFALSE, pdFALSE, pdMS_TO_TICKS(50));
     if (bits & kProtocolErrorBit) {
       err = ESP_ERR_INVALID_RESPONSE;
       break;
@@ -658,12 +772,19 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
     if (bits & kCommandBit) {
       err = process_pending_command(&context, client);
       if (err != ESP_OK) break;
-      continue;
     }
 
-    const std::string observation = make_observation(hub, identity);
-    err = send_text(client, observation);
+    err = flush_lighting_events(&context, client);
     if (err != ESP_OK) break;
+
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us - last_heartbeat_us >=
+        static_cast<int64_t>(kHeartbeatMS) * 1000LL) {
+      const std::string observation = make_observation(hub, identity);
+      err = send_text(client, observation);
+      if (err != ESP_OK) break;
+      last_heartbeat_us = now_us;
+    }
   }
 
 cleanup:
