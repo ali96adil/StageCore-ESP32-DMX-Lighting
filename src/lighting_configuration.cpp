@@ -301,6 +301,32 @@ void cancel_active_locked(const char *reason, bool emit_event) {
   g_fade.active = false;
 }
 
+bool cancel_identify_locked(const char *reason, bool emit_event,
+                            DmxSlotValue *restore) {
+  if (!g_identify.active) return false;
+  if (restore != nullptr) {
+    *restore = DmxSlotValue{
+        g_identify.channel_number,
+        g_identify.restore_value,
+    };
+  }
+  if (emit_event) {
+    LightingCommandEvent event;
+    event.command_id = g_identify.command_id;
+    event.status = "CANCELLED";
+    event.error_code = "COMMAND_SUPERSEDED";
+    event.category = "CANCELLED";
+    event.message = reason != nullptr ? reason : "superseded";
+    event.identify = true;
+    event.channel_key = g_identify.channel_key;
+    event.level = g_identify.requested_level;
+    event.duration_ms = g_identify.duration_ms;
+    push_event_locked(std::move(event));
+  }
+  g_identify.active = false;
+  return true;
+}
+
 double current_level_for(const std::vector<ChannelLevelV1> &levels,
                          const std::string &key) {
   auto it = std::find_if(
