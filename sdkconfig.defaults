@@ -22,3 +22,9 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 # is valid on flash devices 2 MiB or larger. Physical flash size is verified
 # separately before the first real flash.
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+
+# Physical StageCore lighting nodes use 4 MiB ESP32-WROOM flash.
+# Keep ESP-IDF's generated flash-size choice aligned with the board target
+# and the physically qualified hardware.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
