@@ -12,10 +12,11 @@
 #include "config_store.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_tls.h"
 #include "lwip/ip_addr.h"
-#include "mbedtls/sha256.h"
 #include "mbedtls/ssl.h"
+#include "sha/sha_core.h"
 #include "mdns.h"
 
 namespace stagecore {
@@ -88,7 +89,7 @@ bool extract_ipv4(const mdns_result_t *result, std::string *address) {
   for (const mdns_ip_addr_t *item = result->addr; item != nullptr; item = item->next) {
     if (!IP_IS_V4(&item->addr)) continue;
     char text[IPADDR_STRLEN_MAX] = {};
-    if (ipaddr_ntoa_r(&item->addr, text, sizeof(text)) != nullptr) {
+    if (esp_ip4addr_ntoa(&item->addr.u_addr.ip4, text, sizeof(text)) != nullptr) {
       *address = text;
       return true;
     }
@@ -178,10 +179,7 @@ esp_err_t capture_pinned_certificate(const Candidate &candidate,
   }
 
   unsigned char digest[32] = {};
-  if (mbedtls_sha256_ret(peer->raw.p, peer->raw.len, digest, 0) != 0) {
-    esp_tls_conn_destroy(tls);
-    return ESP_FAIL;
-  }
+  esp_sha(SHA2_256, peer->raw.p, peer->raw.len, digest);
 
   const std::string actual = hex_digest(digest);
   if (actual != candidate.tls_sha256) {
