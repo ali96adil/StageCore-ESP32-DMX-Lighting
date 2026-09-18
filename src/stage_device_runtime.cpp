@@ -9,6 +9,7 @@
 #include "lighting_contract.h"
 #include "lighting_configuration.h"
 #include "lighting_output.h"
+#include "trusted_clock.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -45,6 +46,8 @@ struct RuntimeContext {
   std::string project_id;
   std::string inbound;
   std::string pending_command_frame;
+  std::string last_accepted_command_id;
+  std::string last_applied_command_id;
   int expected_payload = 0;
   CommandDedupeCache dedupe;
 };
@@ -72,6 +75,7 @@ cJSON *capabilities_json() {
       "lighting.channels.set",
       "lighting.channels.fade",
       "lighting.blackout",
+      "lighting.identify",
       "lighting.state.read",
       "lighting.config.read",
       "lighting.config.apply",
@@ -87,7 +91,19 @@ cJSON *capabilities_json() {
   return array;
 }
 
-cJSON *observed_state_json() {
+const char *runtime_readiness() {
+  if (!lighting_configuration_ready() ||
+      !lighting_output_dmx_healthy() ||
+      lighting_authority() == "FAILSAFE") {
+    return "BLOCKER";
+  }
+  if (esp_reset_reason() == ESP_RST_BROWNOUT) {
+    return "WARNING";
+  }
+  return "READY";
+}
+
+cJSON *observed_state_json(const RuntimeContext *context = nullptr) {
   cJSON *state = cJSON_CreateObject();
   if (state == nullptr) return nullptr;
 
@@ -120,7 +136,50 @@ cJSON *observed_state_json() {
     cJSON_AddStringToObject(state, "configuration_hash",
                             configuration_hash.c_str());
   }
-  cJSON_AddBoolToObject(state, "brownout_warning", false);
+  LightingActiveFade fade;
+  if (lighting_active_fade(&fade) && trusted_clock_ready()) {
+    const int64_t now_ms = trusted_now_unix_ms();
+    const int64_t started_ms = now_ms - fade.elapsed_ms;
+    const int64_t ends_ms = started_ms + fade.duration_ms;
+    const std::string started_at = format_rfc3339_utc_ms(started_ms);
+    const std::string ends_at = format_rfc3339_utc_ms(ends_ms);
+    if (!started_at.empty() && !ends_at.empty()) {
+      cJSON *active = cJSON_CreateObject();
+      cJSON *targets = cJSON_CreateObject();
+      if (active != nullptr && targets != nullptr) {
+        cJSON_AddStringToObject(active, "command_id",
+                                fade.command_id.c_str());
+        cJSON_AddStringToObject(active, "started_at", started_at.c_str());
+        cJSON_AddStringToObject(active, "ends_at", ends_at.c_str());
+        for (const auto &entry : fade.targets) {
+          cJSON_AddNumberToObject(targets, entry.channel_key.c_str(),
+                                  entry.level);
+        }
+        cJSON_AddItemToObject(active, "targets", targets);
+        cJSON_AddItemToObject(state, "active_fade", active);
+      } else {
+        if (active != nullptr) cJSON_Delete(active);
+        if (targets != nullptr) cJSON_Delete(targets);
+      }
+    }
+  }
+
+  if (context != nullptr) {
+    if (!context->last_accepted_command_id.empty()) {
+      cJSON_AddStringToObject(
+          state, "last_accepted_command_id",
+          context->last_accepted_command_id.c_str());
+    }
+    if (!context->last_applied_command_id.empty()) {
+      cJSON_AddStringToObject(
+          state, "last_applied_command_id",
+          context->last_applied_command_id.c_str());
+    }
+  }
+
+  cJSON_AddBoolToObject(
+      state, "brownout_warning",
+      esp_reset_reason() == ESP_RST_BROWNOUT);
   const std::string authority = lighting_authority();
   cJSON_AddStringToObject(state, "authority", authority.c_str());
   return state;
@@ -173,7 +232,7 @@ std::string make_hello(const VerifiedHub &hub,
     return {};
   }
   cJSON_AddItemToObject(root, "capabilities", caps);
-  cJSON_AddStringToObject(root, "readiness", "BLOCKER");
+  cJSON_AddStringToObject(root, "readiness", runtime_readiness());
   cJSON_AddItemToObject(root, "observed_state", observed);
   cJSON_AddItemToObject(root, "network_state", network);
 
@@ -183,16 +242,17 @@ std::string make_hello(const VerifiedHub &hub,
 }
 
 std::string make_observation(const VerifiedHub &hub,
-                             const DeviceIdentity &identity) {
+                             const DeviceIdentity &identity,
+                             const RuntimeContext *context) {
   cJSON *root = cJSON_CreateObject();
   if (root == nullptr) return {};
 
   cJSON_AddStringToObject(root, "type", "device.observation");
   cJSON_AddNumberToObject(root, "schema_version", 1);
   cJSON_AddStringToObject(root, "device_id", identity.device_id().c_str());
-  cJSON_AddStringToObject(root, "readiness", "BLOCKER");
+  cJSON_AddStringToObject(root, "readiness", runtime_readiness());
 
-  cJSON *observed = observed_state_json();
+  cJSON *observed = observed_state_json(context);
   cJSON *network = network_state_json(hub);
   if (observed == nullptr || network == nullptr) {
     if (observed != nullptr) cJSON_Delete(observed);
