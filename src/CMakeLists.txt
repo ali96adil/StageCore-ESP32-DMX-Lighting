@@ -1,12 +1,17 @@
 idf_component_register(
     SRCS
         "main.cpp"
+        "command_contract.cpp"
         "config_store.cpp"
         "device_identity.cpp"
         "hub_discovery.cpp"
         "hub_security.cpp"
+        "lighting_contract.cpp"
+        "lighting_configuration.cpp"
+        "lighting_output.cpp"
         "provisioning.cpp"
         "stage_device_runtime.cpp"
+        "trusted_clock.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         esp_event

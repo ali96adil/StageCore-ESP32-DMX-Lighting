@@ -1,17 +1,15 @@
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <string>
 
 #include "config_store.h"
 #include "device_identity.h"
-#include "esp_dmx.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hub_discovery.h"
 #include "hub_security.h"
+#include "lighting_configuration.h"
+#include "lighting_output.h"
 #include "nvs_flash.h"
 #include "provisioning.h"
 #include "stage_device_runtime.h"
@@ -20,32 +18,9 @@
 #define STAGECORE_FW_VERSION "0.2.0-dev"
 #endif
 
-#ifndef STAGECORE_DMX_TX_GPIO
-#define STAGECORE_DMX_TX_GPIO 17
-#endif
-
-#ifndef STAGECORE_DMX_RTS_GPIO
-#define STAGECORE_DMX_RTS_GPIO 21
-#endif
-
-#ifndef STAGECORE_DMX_UNIVERSE_SIZE
-#define STAGECORE_DMX_UNIVERSE_SIZE 12
-#endif
-
 namespace {
 
-constexpr dmx_port_t kDmxPort = DMX_NUM_1;
-constexpr int kDmxTxPin = STAGECORE_DMX_TX_GPIO;
-constexpr int kDmxRtsPin = STAGECORE_DMX_RTS_GPIO;
-constexpr std::size_t kChannelCount = STAGECORE_DMX_UNIVERSE_SIZE;
-constexpr std::size_t kFrameBytes = kChannelCount + 1;
-constexpr TickType_t kFramePeriod = pdMS_TO_TICKS(25);
-
-static_assert(kChannelCount >= 1 && kChannelCount <= 12,
-              "StageCore lighting node supports 1..12 physical channels");
-
 const char *kTag = "stagecore-light";
-std::array<uint8_t, DMX_PACKET_SIZE> g_dmx_data{};
 
 void init_nvs() {
   esp_err_t err = nvs_flash_init();
@@ -55,35 +30,6 @@ void init_nvs() {
     err = nvs_flash_init();
   }
   ESP_ERROR_CHECK(err);
-}
-
-bool init_dmx_safe_blackout() {
-  dmx_config_t config = DMX_CONFIG_DEFAULT;
-  dmx_personality_t personalities[] = {
-      {static_cast<uint16_t>(kChannelCount), "StageCore Lighting"},
-  };
-
-  if (!dmx_driver_install(kDmxPort, &config, personalities, 1)) {
-    ESP_LOGE(kTag, "dmx_driver_install failed");
-    return false;
-  }
-  if (!dmx_set_pin(kDmxPort, kDmxTxPin, DMX_PIN_NO_CHANGE, kDmxRtsPin)) {
-    ESP_LOGE(kTag, "dmx_set_pin failed (tx=%d rts=%d)", kDmxTxPin, kDmxRtsPin);
-    return false;
-  }
-
-  g_dmx_data.fill(0);
-  dmx_write(kDmxPort, g_dmx_data.data(), kFrameBytes);
-  return true;
-}
-
-void dmx_task(void *) {
-  TickType_t last_wake = xTaskGetTickCount();
-  while (true) {
-    dmx_send_num(kDmxPort, kFrameBytes);
-    dmx_wait_sent(kDmxPort, DMX_TIMEOUT_TICK);
-    vTaskDelayUntil(&last_wake, kFramePeriod);
-  }
 }
 
 [[noreturn]] void hold_safe_failure(const char *reason) {
@@ -106,16 +52,22 @@ extern "C" void app_main(void) {
   init_nvs();
 
   ESP_LOGI(kTag, "StageCore ESP32 DMX Lighting Node %s", STAGECORE_FW_VERSION);
-  ESP_LOGI(kTag,
-           "safe boot: blackout; DMX TX GPIO=%d RTS GPIO=%d channels=%u",
-           kDmxTxPin, kDmxRtsPin, static_cast<unsigned>(kChannelCount));
+  ESP_LOGI(kTag, "safe boot: blackout");
 
-  if (!init_dmx_safe_blackout()) {
+  if (stagecore::lighting_output_init() != ESP_OK) {
     hold_safe_failure("DMX initialization failed");
   }
-  if (xTaskCreate(&dmx_task, "stagecore-dmx", 4096, nullptr, 10, nullptr) !=
-      pdPASS) {
-    hold_safe_failure("DMX task creation failed");
+  if (stagecore::lighting_output_start() != ESP_OK) {
+    hold_safe_failure("DMX task startup failed");
+  }
+
+  const esp_err_t lighting_config_err =
+      stagecore::lighting_configuration_init();
+  if (lighting_config_err != ESP_OK) {
+    ESP_LOGW(kTag,
+             "stored lighting configuration unavailable (%s); "
+             "physical-zero failsafe retained until CONFIG_APPLY",
+             esp_err_to_name(lighting_config_err));
   }
 
   stagecore::DeviceIdentity identity;
@@ -167,8 +119,14 @@ extern "C" void app_main(void) {
 
     const esp_err_t runtime_err = stagecore::run_stage_device_runtime(
         hub, credential, identity, config);
+    const esp_err_t failsafe_err = stagecore::lighting_blackout(true);
+    if (failsafe_err != ESP_OK) {
+      ESP_LOGE(kTag, "failsafe blackout failed after runtime exit: %s",
+               esp_err_to_name(failsafe_err));
+    }
     ESP_LOGW(kTag,
-             "Stage Device runtime ended (%s); re-authenticating, blackout held",
+             "Stage Device runtime ended (%s); failsafe blackout requested "
+             "before re-authentication",
              esp_err_to_name(runtime_err));
     credential = stagecore::RuntimeCredential{};
     vTaskDelay(pdMS_TO_TICKS(2000));
