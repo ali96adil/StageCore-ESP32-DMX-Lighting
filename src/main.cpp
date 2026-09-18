@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hub_discovery.h"
+#include "hub_security.h"
 #include "nvs_flash.h"
 #include "provisioning.h"
 
@@ -151,8 +152,18 @@ extern "C" void app_main(void) {
 
   ESP_LOGI(kTag, "verified Hub %s (%s)",
            hub.display_name.c_str(), hub.hub_id.c_str());
+
+  stagecore::RuntimeCredential credential;
+  while (stagecore::ensure_paired_and_authenticate(
+             hub, &identity, config.display_name, &credential) != ESP_OK) {
+    ESP_LOGW(kTag,
+             "StageCore pairing/auth unavailable; DMX remains blackout");
+    credential = stagecore::RuntimeCredential{};
+    vTaskDelay(pdMS_TO_TICKS(5000));
+  }
+
   ESP_LOGI(kTag,
-           "Hub trust foundation ready; pairing/auth/runtime is the next sub-slice");
+           "authenticated runtime session ready; WebSocket is the next sub-slice");
 
   while (true) vTaskDelay(pdMS_TO_TICKS(1000));
 }
