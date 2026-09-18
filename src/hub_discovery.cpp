@@ -242,20 +242,6 @@ esp_err_t verify_public_identity(const Candidate &candidate,
   const esp_err_t performed = esp_http_client_perform(client);
   const int status = esp_http_client_get_status_code(client);
 
-  if (performed == ESP_OK && status == 200) {
-    if (!body.date_header.empty()) {
-      const esp_err_t clock_err =
-          update_trusted_clock_from_http_date(body.date_header.c_str());
-      if (clock_err == ESP_OK) {
-        ESP_LOGI(kTag, "trusted UTC synchronized from verified Hub");
-      } else {
-        ESP_LOGW(kTag, "verified Hub Date header was not usable");
-      }
-    } else {
-      ESP_LOGW(kTag, "verified Hub response omitted Date header");
-    }
-  }
-
   esp_http_client_cleanup(client);
   if (performed != ESP_OK || status != 200) {
     ESP_LOGE(kTag, "Hub identity probe failed status=%d err=%s",
@@ -286,6 +272,18 @@ esp_err_t verify_public_identity(const Candidate &candidate,
   if (!ok) {
     ESP_LOGE(kTag, "Hub public identity does not match Bonjour advertisement");
     return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  if (!body.date_header.empty()) {
+    const esp_err_t clock_err =
+        update_trusted_clock_from_http_date(body.date_header.c_str());
+    if (clock_err == ESP_OK) {
+      ESP_LOGI(kTag, "trusted UTC synchronized from verified Hub");
+    } else {
+      ESP_LOGW(kTag, "verified Hub Date header was not usable");
+    }
+  } else {
+    ESP_LOGW(kTag, "verified Hub response omitted Date header");
   }
   return ESP_OK;
 }
