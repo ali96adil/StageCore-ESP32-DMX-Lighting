@@ -145,17 +145,29 @@ esp_err_t lighting_output_start() {
   return ESP_OK;
 }
 
-esp_err_t lighting_output_blackout_immediate() {
+esp_err_t lighting_output_apply_slots(
+    const std::vector<DmxSlotValue> &updates) {
   if (!g_initialized.load() || g_frame_lock == nullptr || g_task == nullptr) {
     return ESP_ERR_INVALID_STATE;
+  }
+  if (updates.empty() || updates.size() > kChannelCount) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  std::array<bool, kChannelCount + 1> seen{};
+  for (const auto &update : updates) {
+    if (update.channel < 1 || update.channel > kChannelCount ||
+        seen[update.channel]) {
+      return ESP_ERR_INVALID_ARG;
+    }
+    seen[update.channel] = true;
   }
 
   if (xSemaphoreTake(g_frame_lock, pdMS_TO_TICKS(25)) != pdTRUE) {
     return ESP_ERR_TIMEOUT;
   }
-  g_frame[0] = 0;
-  for (std::size_t i = 1; i <= kChannelCount; ++i) {
-    g_frame[i] = 0;
+  for (const auto &update : updates) {
+    g_frame[update.channel] = update.value;
   }
   const uint32_t target = g_requested_generation.fetch_add(1) + 1;
   xSemaphoreGive(g_frame_lock);
@@ -165,6 +177,16 @@ esp_err_t lighting_output_blackout_immediate() {
     return ESP_ERR_TIMEOUT;
   }
   return g_healthy.load() ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t lighting_output_blackout_immediate() {
+  std::vector<DmxSlotValue> updates;
+  updates.reserve(kChannelCount);
+  for (std::size_t i = 1; i <= kChannelCount; ++i) {
+    updates.push_back(
+        DmxSlotValue{static_cast<uint8_t>(i), static_cast<uint8_t>(0)});
+  }
+  return lighting_output_apply_slots(updates);
 }
 
 bool lighting_output_dmx_healthy() {
