@@ -280,7 +280,7 @@ std::vector<ChannelLevelV1> blackout_levels(
 }
 
 void push_event_locked(LightingCommandEvent event) {
-  constexpr size_t kEventCapacity = 8;
+  constexpr size_t kEventCapacity = 32;
   if (g_events.size() >= kEventCapacity) {
     g_events.erase(g_events.begin());
   }
@@ -402,7 +402,69 @@ void fade_task(void *) {
       continue;
     }
 
-    if (!g_fade.active || !g_ready) {
+    if (!g_ready) {
+      xSemaphoreGive(g_lock);
+      xSemaphoreGive(g_operation_lock);
+      continue;
+    }
+
+    if (g_identify.active) {
+      const ActiveIdentifyInternal identify = g_identify;
+      const std::vector<LightingChannelConfigV1> configuration =
+          g_configuration;
+      const int64_t elapsed_us =
+          std::max<int64_t>(0, esp_timer_get_time() - identify.started_us);
+      if (elapsed_us < identify.duration_ms * 1000LL) {
+        xSemaphoreGive(g_lock);
+        xSemaphoreGive(g_operation_lock);
+        continue;
+      }
+      xSemaphoreGive(g_lock);
+
+      const std::vector<DmxSlotValue> restore = {
+          DmxSlotValue{identify.channel_number, identify.restore_value},
+      };
+      const esp_err_t restore_err = lighting_output_apply_slots(restore);
+
+      esp_err_t blackout_err = ESP_OK;
+      if (restore_err != ESP_OK) {
+        blackout_err =
+            lighting_output_apply_slots(blackout_slots(configuration));
+      }
+
+      if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+        if (g_identify.active &&
+            g_identify.generation == identify.generation) {
+          LightingCommandEvent event;
+          event.command_id = identify.command_id;
+          event.identify = true;
+          event.channel_key = identify.channel_key;
+          event.level = identify.requested_level;
+          event.duration_ms = identify.duration_ms;
+          if (restore_err == ESP_OK) {
+            event.status = "COMPLETED";
+            g_authority = "STAGECORE";
+          } else {
+            event.status = "FAILED";
+            event.error_code = "DMX_OUTPUT_FAILED";
+            event.category = "DEVICE";
+            event.message =
+                "Identify restore frame was not confirmed by the output task";
+            g_authority = "FAILSAFE";
+            if (blackout_err == ESP_OK) {
+              g_levels = blackout_levels(g_configuration);
+            }
+          }
+          push_event_locked(std::move(event));
+          g_identify.active = false;
+        }
+        xSemaphoreGive(g_lock);
+      }
+      xSemaphoreGive(g_operation_lock);
+      continue;
+    }
+
+    if (!g_fade.active) {
       xSemaphoreGive(g_lock);
       xSemaphoreGive(g_operation_lock);
       continue;
