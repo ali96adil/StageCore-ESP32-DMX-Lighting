@@ -9,3 +9,10 @@ CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
 CONFIG_MBEDTLS_SSL_TLS1_3_KEXM_EPHEMERAL=y
 CONFIG_MBEDTLS_SSL_TLS1_3_COMPATIBILITY_MODE=y
 CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
+
+# Used only for a credential-free TLS preflight that captures the peer
+# certificate. The SHA-256 fingerprint must match StageCore Bonjour before any
+# HTTP/WebSocket credential is sent. All application connections then use the
+# captured DER certificate as the trust anchor.
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
