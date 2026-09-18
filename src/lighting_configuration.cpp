@@ -1060,5 +1060,117 @@ esp_err_t lighting_blackout_fade(
   return err;
 }
 
+esp_err_t lighting_identify(
+    const std::string &command_id,
+    const std::string &channel_key,
+    double level,
+    int64_t duration_ms,
+    std::string *error_message) {
+  if (command_id.empty() || channel_key.empty() ||
+      !std::isfinite(level) || level < 0.0 || level > 100.0 ||
+      duration_ms < 100 || duration_ms > 10000 ||
+      error_message == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  esp_err_t err = ensure_lock();
+  if (err != ESP_OK) return err;
+  if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  err = restore_identify_for_partial_operation(
+      "superseded by newer identify");
+  if (err != ESP_OK) {
+    *error_message = "Previous identify restore was not confirmed";
+    xSemaphoreGive(g_operation_lock);
+    return err;
+  }
+
+  LightingChannelConfigV1 channel;
+  double previous_level = 0.0;
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    xSemaphoreGive(g_operation_lock);
+    return ESP_ERR_TIMEOUT;
+  }
+  if (!g_ready) {
+    xSemaphoreGive(g_lock);
+    xSemaphoreGive(g_operation_lock);
+    *error_message = "No validated lighting configuration is installed";
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  auto it = std::find_if(
+      g_configuration.begin(), g_configuration.end(),
+      [&](const auto &cfg) { return cfg.channel_key == channel_key; });
+  if (it == g_configuration.end() || !it->enabled ||
+      it->kind == "UNUSED") {
+    xSemaphoreGive(g_lock);
+    xSemaphoreGive(g_operation_lock);
+    *error_message = "Identify channel is unknown or disabled";
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  channel = *it;
+  previous_level = current_level_for(g_levels, channel_key);
+  cancel_active_locked("superseded by identify", true);
+  xSemaphoreGive(g_lock);
+
+  const std::vector<DmxSlotValue> identify_update = {
+      DmxSlotValue{
+          static_cast<uint8_t>(channel.channel_number),
+          level_to_dmx(channel, level),
+      },
+  };
+  err = lighting_output_apply_slots(identify_update);
+  if (err != ESP_OK) {
+    *error_message = "Identify DMX frame was not confirmed";
+    xSemaphoreGive(g_operation_lock);
+    return err;
+  }
+
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    const std::vector<DmxSlotValue> restore = {
+        DmxSlotValue{
+            static_cast<uint8_t>(channel.channel_number),
+            level_to_dmx(channel, previous_level),
+        },
+    };
+    (void)lighting_output_apply_slots(restore);
+    xSemaphoreGive(g_operation_lock);
+    return ESP_ERR_TIMEOUT;
+  }
+
+  ActiveIdentifyInternal identify;
+  identify.active = true;
+  identify.generation = g_next_identify_generation++;
+  identify.command_id = command_id;
+  identify.started_us = esp_timer_get_time();
+  identify.duration_ms = duration_ms;
+  identify.channel_key = channel_key;
+  identify.requested_level = level;
+  identify.previous_level = previous_level;
+  identify.channel_number = static_cast<uint8_t>(channel.channel_number);
+  identify.restore_value = level_to_dmx(channel, previous_level);
+  g_identify = std::move(identify);
+  g_authority = "STAGECORE";
+  xSemaphoreGive(g_lock);
+  xSemaphoreGive(g_operation_lock);
+  return ESP_OK;
+}
+
+void lighting_runtime_authority_acquired() {
+  if (g_lock == nullptr ||
+      xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return;
+  }
+  if (g_ready && lighting_output_dmx_healthy()) {
+    g_authority = "STAGECORE";
+  } else {
+    g_authority = "FAILSAFE";
+  }
+  xSemaphoreGive(g_lock);
+}
+
 }  // namespace stagecore
 
