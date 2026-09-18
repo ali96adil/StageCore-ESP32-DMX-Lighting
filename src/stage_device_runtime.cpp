@@ -472,6 +472,21 @@ esp_err_t flush_lighting_events(RuntimeContext *context,
   return ESP_OK;
 }
 
+void note_command_accepted(RuntimeContext *context,
+                           const std::string &command_id) {
+  if (context != nullptr && !command_id.empty()) {
+    context->last_accepted_command_id = command_id;
+  }
+}
+
+void note_command_applied(RuntimeContext *context,
+                          const std::string &command_id) {
+  if (context != nullptr && !command_id.empty()) {
+    context->last_accepted_command_id = command_id;
+    context->last_applied_command_id = command_id;
+  }
+}
+
 esp_err_t process_pending_command(RuntimeContext *context,
                                   esp_websocket_client_handle_t client) {
   if (context == nullptr || context->command_lock == nullptr ||
@@ -543,6 +558,7 @@ esp_err_t process_pending_command(RuntimeContext *context,
     const std::string result = completed_result(
         context->device_id, decision.command.command_id, result_payload);
     if (result.empty()) return ESP_FAIL;
+    note_command_applied(context, decision.command.command_id);
     context->dedupe.Remember(decision.command.command_id, result);
     return send_text(client, result);
   }
@@ -563,6 +579,7 @@ esp_err_t process_pending_command(RuntimeContext *context,
     const std::string result = completed_result(
         context->device_id, decision.command.command_id, configuration);
     if (result.empty()) return ESP_FAIL;
+    note_command_applied(context, decision.command.command_id);
     context->dedupe.Remember(decision.command.command_id, result);
     return send_text(client, result);
   }
@@ -603,6 +620,7 @@ esp_err_t process_pending_command(RuntimeContext *context,
     const std::string result = completed_result(
         context->device_id, decision.command.command_id, result_payload);
     if (result.empty()) return ESP_FAIL;
+    note_command_applied(context, decision.command.command_id);
     context->dedupe.Remember(decision.command.command_id, result);
     return send_text(client, result);
   }
@@ -639,6 +657,7 @@ esp_err_t process_pending_command(RuntimeContext *context,
     const std::string accepted = make_command_result(
         context->device_id, decision.command.command_id, "ACCEPTED",
         "", "", "", false);
+    note_command_accepted(context, decision.command.command_id);
     context->dedupe.Remember(decision.command.command_id, accepted);
     return send_text(client, accepted);
   }
@@ -669,6 +688,7 @@ esp_err_t process_pending_command(RuntimeContext *context,
       const std::string accepted = make_command_result(
           context->device_id, decision.command.command_id, "ACCEPTED",
           "", "", "", false);
+      note_command_accepted(context, decision.command.command_id);
       context->dedupe.Remember(decision.command.command_id, accepted);
       return send_text(client, accepted);
     }
@@ -693,12 +713,14 @@ esp_err_t process_pending_command(RuntimeContext *context,
     const std::string result = completed_result(
         context->device_id, decision.command.command_id, result_payload);
     if (result.empty()) return ESP_FAIL;
+    note_command_applied(context, decision.command.command_id);
     context->dedupe.Remember(decision.command.command_id, result);
     return send_text(client, result);
   }
 
   if (decision.command.command_type == "LIGHTING_STATE_READ") {
-    cJSON *state = observed_state_json();
+    note_command_applied(context, decision.command.command_id);
+    cJSON *state = observed_state_json(context);
     if (state == nullptr) return ESP_ERR_NO_MEM;
     const std::string result = completed_result(
         context->device_id, decision.command.command_id, state);
