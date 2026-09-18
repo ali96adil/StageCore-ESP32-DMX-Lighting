@@ -515,6 +515,10 @@ void fade_task(void *) {
         !valid ? ESP_ERR_INVALID_STATE
                : (updates.empty() ? ESP_OK
                                   : lighting_output_apply_slots(updates));
+    const esp_err_t failsafe_err =
+        output_err == ESP_OK
+            ? ESP_OK
+            : lighting_output_apply_slots(blackout_slots(configuration));
 
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
       if (g_fade.active && g_fade.generation == fade.generation) {
@@ -528,6 +532,9 @@ void fade_task(void *) {
           push_event_locked(std::move(event));
           g_fade.active = false;
           g_authority = "FAILSAFE";
+          if (failsafe_err == ESP_OK) {
+            g_levels = blackout_levels(g_configuration);
+          }
         } else {
           update_levels_locked(levels);
           g_authority = "STAGECORE";
