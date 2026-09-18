@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "hub_discovery.h"
 #include "nvs_flash.h"
 #include "provisioning.h"
 
@@ -141,8 +142,17 @@ extern "C" void app_main(void) {
 
   ESP_LOGI(kTag, "provisioned for project %s as %s",
            config.project_id.c_str(), config.display_name.c_str());
+
+  stagecore::VerifiedHub hub;
+  while (stagecore::discover_and_verify_hub(&hub) != ESP_OK) {
+    ESP_LOGW(kTag, "no verified StageCore Hub yet; DMX remains blackout");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+  }
+
+  ESP_LOGI(kTag, "verified Hub %s (%s)",
+           hub.display_name.c_str(), hub.hub_id.c_str());
   ESP_LOGI(kTag,
-           "network foundation ready; Hub discovery/pairing is the next sub-slice");
+           "Hub trust foundation ready; pairing/auth/runtime is the next sub-slice");
 
   while (true) vTaskDelay(pdMS_TO_TICKS(1000));
 }
