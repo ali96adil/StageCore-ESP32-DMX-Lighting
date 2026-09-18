@@ -1,6 +1,7 @@
 #include "stage_device_runtime.h"
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "cJSON.h"
