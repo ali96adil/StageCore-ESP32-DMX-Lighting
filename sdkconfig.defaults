@@ -1,0 +1,24 @@
+# StageCore ESP32 DMX Lighting Node
+# ESP-IDF 6.1 / ESP32-WROOM defaults.
+
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# StageCore secure device gateway requires TLS 1.3.
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
+CONFIG_MBEDTLS_SSL_TLS1_3_KEXM_EPHEMERAL=y
+CONFIG_MBEDTLS_SSL_TLS1_3_COMPATIBILITY_MODE=y
+CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
+
+# Used only for a credential-free TLS preflight that captures the peer
+# certificate. The SHA-256 fingerprint must match StageCore Bonjour before any
+# HTTP/WebSocket credential is sent. All application connections then use the
+# captured DER certificate as the trust anchor.
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+
+# Firmware exceeds the default 1 MiB app slot once secure discovery/TLS is linked.
+# ESP-IDF's built-in LARGE single-app table provides a 1500 KiB factory app and
+# is valid on flash devices 2 MiB or larger. Physical flash size is verified
+# separately before the first real flash.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

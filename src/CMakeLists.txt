@@ -1,0 +1,24 @@
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "config_store.cpp"
+        "device_identity.cpp"
+        "hub_discovery.cpp"
+        "hub_security.cpp"
+        "provisioning.cpp"
+        "stage_device_runtime.cpp"
+    INCLUDE_DIRS "."
+    REQUIRES
+        esp_event
+        esp_http_client
+        esp_http_server
+        esp-tls
+        esp_netif
+        esp_timer
+        esp_wifi
+        esp_websocket_client
+        json
+        mbedtls
+        mdns
+        nvs_flash
+)

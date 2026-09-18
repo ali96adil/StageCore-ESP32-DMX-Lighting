@@ -1,0 +1,6 @@
+# StageCore ESP32 DMX Lighting Node
+# Matches ESP-IDF partitions_singleapp_large.csv.
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     ,        0x6000,
+phy_init, data, phy,     ,        0x1000,
+factory,  app,  factory, ,        1500K,
