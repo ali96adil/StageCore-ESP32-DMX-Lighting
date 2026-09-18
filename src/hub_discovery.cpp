@@ -18,6 +18,7 @@
 #include "mbedtls/ssl.h"
 #include "sha/sha_core.h"
 #include "mdns.h"
+#include "trusted_clock.h"
 
 namespace stagecore {
 namespace {
@@ -234,6 +235,23 @@ esp_err_t verify_public_identity(const Candidate &candidate,
 
   const esp_err_t performed = esp_http_client_perform(client);
   const int status = esp_http_client_get_status_code(client);
+
+  if (performed == ESP_OK && status == 200) {
+    char *date_header = nullptr;
+    if (esp_http_client_get_header(client, "Date", &date_header) == ESP_OK &&
+        date_header != nullptr) {
+      const esp_err_t clock_err =
+          update_trusted_clock_from_http_date(date_header);
+      if (clock_err == ESP_OK) {
+        ESP_LOGI(kTag, "trusted UTC synchronized from verified Hub");
+      } else {
+        ESP_LOGW(kTag, "verified Hub Date header was not usable");
+      }
+    } else {
+      ESP_LOGW(kTag, "verified Hub response omitted Date header");
+    }
+  }
+
   esp_http_client_cleanup(client);
   if (performed != ESP_OK || status != 200) {
     ESP_LOGE(kTag, "Hub identity probe failed status=%d err=%s",
