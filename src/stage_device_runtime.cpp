@@ -450,7 +450,7 @@ std::string lighting_event_result(
   return make_command_result(
       device_id, event.command_id, event.status.c_str(),
       event.error_code.c_str(), event.category.c_str(),
-      event.message.c_str(), false);
+      event.message.c_str(), event.status == "FAILED");
 }
 
 esp_err_t flush_lighting_events(RuntimeContext *context,
@@ -532,6 +532,16 @@ esp_err_t process_pending_command(RuntimeContext *context,
   }
 
   if (decision.command.command_type == "LIGHTING_CONFIG_APPLY") {
+    if (decision.command.runtime_snapshot_id.empty()) {
+      const std::string result = make_command_result(
+          context->device_id, decision.command.command_id, "REJECTED",
+          "RUNTIME_SNAPSHOT_REQUIRED", "CONFIGURATION",
+          "CONFIG_APPLY requires a Published Runtime Snapshot identity",
+          false);
+      context->dedupe.Remember(decision.command.command_id, result);
+      return send_text(client, result);
+    }
+
     std::string configuration_hash;
     const esp_err_t apply_err =
         lighting_configuration_apply(payload.configuration,
