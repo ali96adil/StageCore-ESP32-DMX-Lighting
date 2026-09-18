@@ -3,13 +3,18 @@ idf_component_register(
         "main.cpp"
         "config_store.cpp"
         "device_identity.cpp"
+        "hub_discovery.cpp"
         "provisioning.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         esp_event
+        esp_http_client
         esp_http_server
+        esp-tls
         esp_netif
         esp_wifi
+        json
         mbedtls
+        mdns
         nvs_flash
 )
