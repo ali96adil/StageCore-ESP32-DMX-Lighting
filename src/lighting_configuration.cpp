@@ -654,6 +654,40 @@ std::string lighting_authority() {
   return authority;
 }
 
+bool lighting_pop_command_event(LightingCommandEvent *event) {
+  if (event == nullptr || g_lock == nullptr ||
+      xSemaphoreTake(g_lock, pdMS_TO_TICKS(20)) != pdTRUE) {
+    return false;
+  }
+  if (g_events.empty()) {
+    xSemaphoreGive(g_lock);
+    return false;
+  }
+  *event = std::move(g_events.front());
+  g_events.erase(g_events.begin());
+  xSemaphoreGive(g_lock);
+  return true;
+}
+
+bool lighting_active_fade(LightingActiveFade *fade) {
+  if (g_lock == nullptr ||
+      xSemaphoreTake(g_lock, pdMS_TO_TICKS(20)) != pdTRUE) {
+    return false;
+  }
+  const bool active = g_fade.active;
+  if (active && fade != nullptr) {
+    fade->command_id = g_fade.command_id;
+    fade->duration_ms = g_fade.duration_ms;
+    const int64_t elapsed_us =
+        std::max<int64_t>(0, esp_timer_get_time() - g_fade.started_us);
+    fade->elapsed_ms =
+        std::min<int64_t>(g_fade.duration_ms, elapsed_us / 1000LL);
+    fade->targets = g_fade.targets;
+  }
+  xSemaphoreGive(g_lock);
+  return active;
+}
+
 esp_err_t lighting_configuration_apply(
     const std::vector<LightingChannelConfigV1> &configuration,
     std::string *configuration_hash) {
@@ -669,15 +703,49 @@ esp_err_t lighting_configuration_apply(
   }
   const std::string hash = sha256_hex(canonical);
 
-  // Force the candidate configuration to its semantic logical blackout before
-  // it becomes persistent or authoritative.
+  if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  bool old_ready = false;
+  std::vector<LightingChannelConfigV1> old_configuration;
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+    old_ready = g_ready;
+    old_configuration = g_configuration;
+    cancel_active_locked("superseded by configuration apply", true);
+    xSemaphoreGive(g_lock);
+  } else {
+    xSemaphoreGive(g_operation_lock);
+    return ESP_ERR_TIMEOUT;
+  }
+
+  // The candidate configuration becomes persistent only after its semantic
+  // blackout has been physically confirmed.
   err = lighting_output_apply_slots(blackout_slots(configuration));
-  if (err != ESP_OK) return err;
+  if (err != ESP_OK) {
+    xSemaphoreGive(g_operation_lock);
+    return err;
+  }
 
   err = write_config_blob(canonical);
-  if (err != ESP_OK) return err;
+  if (err != ESP_OK) {
+    // Persistence failed after the candidate blackout reached the bus.
+    // Return to a known safe state under the previous configuration.
+    const esp_err_t rollback_err =
+        old_ready
+            ? lighting_output_apply_slots(blackout_slots(old_configuration))
+            : lighting_output_blackout_immediate();
+    if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+      if (old_ready) g_levels = blackout_levels(old_configuration);
+      g_authority = "FAILSAFE";
+      xSemaphoreGive(g_lock);
+    }
+    xSemaphoreGive(g_operation_lock);
+    return rollback_err == ESP_OK ? err : rollback_err;
+  }
 
   if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    xSemaphoreGive(g_operation_lock);
     return ESP_ERR_TIMEOUT;
   }
   g_configuration = configuration;
@@ -687,6 +755,7 @@ esp_err_t lighting_configuration_apply(
   g_authority = "STAGECORE";
   g_ready = true;
   xSemaphoreGive(g_lock);
+  xSemaphoreGive(g_operation_lock);
 
   *configuration_hash = hash;
   return ESP_OK;
@@ -700,80 +769,147 @@ esp_err_t lighting_channels_set(
       error_message == nullptr) {
     return ESP_ERR_INVALID_ARG;
   }
+  esp_err_t err = ensure_lock();
+  if (err != ESP_OK) return err;
+  if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
 
   std::vector<LightingChannelConfigV1> configuration;
-  if (!copy_state(&configuration, nullptr, nullptr, nullptr, nullptr)) {
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    xSemaphoreGive(g_operation_lock);
+    return ESP_ERR_TIMEOUT;
+  }
+  if (!g_ready) {
+    xSemaphoreGive(g_lock);
+    xSemaphoreGive(g_operation_lock);
     *error_message = "No validated lighting configuration is installed";
     return ESP_ERR_INVALID_STATE;
   }
+  configuration = g_configuration;
+  cancel_active_locked("superseded by immediate channel set", true);
+  xSemaphoreGive(g_lock);
 
   std::vector<DmxSlotValue> updates;
   std::vector<ChannelLevelV1> values;
-  for (const auto &request : requested) {
-    auto it = std::find_if(
-        configuration.begin(), configuration.end(),
-        [&](const auto &cfg) { return cfg.channel_key == request.channel_key; });
-    if (it == configuration.end() || !it->enabled || it->kind == "UNUSED") {
-      *error_message = "Requested lighting channel is unknown or disabled";
-      return ESP_ERR_NOT_FOUND;
-    }
-
-    double level = request.level;
-    if (level < it->minimum_level) level = it->minimum_level;
-    if (level > it->maximum_level) level = it->maximum_level;
-    values.push_back(ChannelLevelV1{it->channel_key, level});
-    updates.push_back(DmxSlotValue{
-        static_cast<uint8_t>(it->channel_number),
-        level_to_dmx(*it, level),
-    });
+  if (!normalize_requested(configuration, requested, true,
+                           &values, &updates, error_message)) {
+    xSemaphoreGive(g_operation_lock);
+    return ESP_ERR_NOT_FOUND;
   }
 
-  esp_err_t err = lighting_output_apply_slots(updates);
+  err = lighting_output_apply_slots(updates);
   if (err != ESP_OK) {
     *error_message = "DMX frame was not confirmed by the output task";
+    xSemaphoreGive(g_operation_lock);
     return err;
   }
 
   if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    xSemaphoreGive(g_operation_lock);
     return ESP_ERR_TIMEOUT;
   }
-  for (const auto &value : values) {
-    auto level_it = std::find_if(
-        g_levels.begin(), g_levels.end(),
-        [&](const auto &existing) {
-          return existing.channel_key == value.channel_key;
-        });
-    if (level_it != g_levels.end()) {
-      level_it->level = value.level;
-    } else {
-      g_levels.push_back(value);
-    }
-  }
+  update_levels_locked(values);
   g_authority = "STAGECORE";
   xSemaphoreGive(g_lock);
+  xSemaphoreGive(g_operation_lock);
 
   *normalized = std::move(values);
   return ESP_OK;
 }
 
-esp_err_t lighting_blackout(bool failsafe) {
-  std::vector<LightingChannelConfigV1> configuration;
-  const bool ready =
-      copy_state(&configuration, nullptr, nullptr, nullptr, nullptr);
+esp_err_t lighting_channels_fade(
+    const std::string &command_id,
+    const std::vector<ChannelLevelV1> &requested,
+    int64_t fade_ms,
+    std::vector<ChannelLevelV1> *normalized,
+    std::string *error_message) {
+  if (command_id.empty() || requested.empty() || fade_ms <= 0 ||
+      normalized == nullptr || error_message == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  esp_err_t err = ensure_lock();
+  if (err != ESP_OK) return err;
+  if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  err = start_fade_locked(command_id, requested, fade_ms, false,
+                          normalized, error_message);
+  xSemaphoreGive(g_operation_lock);
+  return err;
+}
 
-  esp_err_t err = ready
+esp_err_t lighting_blackout(bool failsafe) {
+  esp_err_t err = ensure_lock();
+  if (err != ESP_OK) return err;
+  if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  bool ready = false;
+  std::vector<LightingChannelConfigV1> configuration;
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    xSemaphoreGive(g_operation_lock);
+    return ESP_ERR_TIMEOUT;
+  }
+  ready = g_ready;
+  configuration = g_configuration;
+  cancel_active_locked("superseded by blackout", !failsafe);
+  if (failsafe) g_events.clear();
+  xSemaphoreGive(g_lock);
+
+  err = ready
       ? lighting_output_apply_slots(blackout_slots(configuration))
       : lighting_output_blackout_immediate();
-  if (err != ESP_OK) return err;
+  if (err != ESP_OK) {
+    xSemaphoreGive(g_operation_lock);
+    return err;
+  }
 
-  if (g_lock == nullptr ||
-      xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    xSemaphoreGive(g_operation_lock);
     return ESP_ERR_TIMEOUT;
   }
   if (g_ready) g_levels = blackout_levels(g_configuration);
   g_authority = failsafe ? "FAILSAFE" : "STAGECORE";
   xSemaphoreGive(g_lock);
+  xSemaphoreGive(g_operation_lock);
   return ESP_OK;
 }
 
+esp_err_t lighting_blackout_fade(
+    const std::string &command_id,
+    int64_t fade_ms,
+    std::string *error_message) {
+  if (command_id.empty() || fade_ms <= 0 || error_message == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  esp_err_t err = ensure_lock();
+  if (err != ESP_OK) return err;
+  if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  std::vector<ChannelLevelV1> targets;
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    xSemaphoreGive(g_operation_lock);
+    return ESP_ERR_TIMEOUT;
+  }
+  if (!g_ready) {
+    xSemaphoreGive(g_lock);
+    xSemaphoreGive(g_operation_lock);
+    *error_message = "No validated lighting configuration is installed";
+    return ESP_ERR_INVALID_STATE;
+  }
+  targets = blackout_levels(g_configuration);
+  xSemaphoreGive(g_lock);
+
+  std::vector<ChannelLevelV1> normalized;
+  err = start_fade_locked(command_id, targets, fade_ms, true,
+                          &normalized, error_message);
+  xSemaphoreGive(g_operation_lock);
+  return err;
+}
+
 }  // namespace stagecore
+
