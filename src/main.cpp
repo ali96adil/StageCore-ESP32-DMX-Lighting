@@ -1,13 +1,17 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
+#include "config_store.h"
+#include "device_identity.h"
 #include "esp_dmx.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "provisioning.h"
 
 #ifndef STAGECORE_FW_VERSION
 #define STAGECORE_FW_VERSION "0.2.0-dev"
@@ -31,8 +35,8 @@ constexpr dmx_port_t kDmxPort = DMX_NUM_1;
 constexpr int kDmxTxPin = STAGECORE_DMX_TX_GPIO;
 constexpr int kDmxRtsPin = STAGECORE_DMX_RTS_GPIO;
 constexpr std::size_t kChannelCount = STAGECORE_DMX_UNIVERSE_SIZE;
-constexpr std::size_t kFrameBytes = kChannelCount + 1;  // start code + slots
-constexpr TickType_t kFramePeriod = pdMS_TO_TICKS(25);   // ~40 Hz
+constexpr std::size_t kFrameBytes = kChannelCount + 1;
+constexpr TickType_t kFramePeriod = pdMS_TO_TICKS(25);
 
 static_assert(kChannelCount >= 1 && kChannelCount <= 12,
               "StageCore lighting node supports 1..12 physical channels");
@@ -42,7 +46,8 @@ std::array<uint8_t, DMX_PACKET_SIZE> g_dmx_data{};
 
 void init_nvs() {
   esp_err_t err = nvs_flash_init();
-  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+      err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
     err = nvs_flash_init();
   }
@@ -59,23 +64,37 @@ bool init_dmx_safe_blackout() {
     ESP_LOGE(kTag, "dmx_driver_install failed");
     return false;
   }
-
   if (!dmx_set_pin(kDmxPort, kDmxTxPin, DMX_PIN_NO_CHANGE, kDmxRtsPin)) {
     ESP_LOGE(kTag, "dmx_set_pin failed (tx=%d rts=%d)", kDmxTxPin, kDmxRtsPin);
     return false;
   }
 
-  // DMX slot 0 is the NULL start code. Slots 1..12 start at blackout.
   g_dmx_data.fill(0);
   dmx_write(kDmxPort, g_dmx_data.data(), kFrameBytes);
   return true;
 }
 
-[[noreturn]] void hold_safe_failure() {
-  ESP_LOGE(kTag, "firmware stopped in safe failure state");
+void dmx_task(void *) {
+  TickType_t last_wake = xTaskGetTickCount();
   while (true) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    dmx_send_num(kDmxPort, kFrameBytes);
+    dmx_wait_sent(kDmxPort, DMX_TIMEOUT_TICK);
+    vTaskDelayUntil(&last_wake, kFramePeriod);
   }
+}
+
+[[noreturn]] void hold_safe_failure(const char *reason) {
+  ESP_LOGE(kTag, "safe failure: %s", reason);
+  while (true) vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+std::string default_display_name(const std::string &device_id) {
+  std::string suffix;
+  for (char ch : device_id) {
+    if (ch != '-') suffix.push_back(ch);
+  }
+  if (suffix.size() > 6) suffix = suffix.substr(suffix.size() - 6);
+  return "StageCore Lighting " + suffix;
 }
 
 }  // namespace
@@ -84,19 +103,46 @@ extern "C" void app_main(void) {
   init_nvs();
 
   ESP_LOGI(kTag, "StageCore ESP32 DMX Lighting Node %s", STAGECORE_FW_VERSION);
-  ESP_LOGI(kTag, "safe boot: blackout; DMX TX GPIO=%d RTS GPIO=%d channels=%u",
+  ESP_LOGI(kTag,
+           "safe boot: blackout; DMX TX GPIO=%d RTS GPIO=%d channels=%u",
            kDmxTxPin, kDmxRtsPin, static_cast<unsigned>(kChannelCount));
 
   if (!init_dmx_safe_blackout()) {
-    hold_safe_failure();
+    hold_safe_failure("DMX initialization failed");
+  }
+  if (xTaskCreate(&dmx_task, "stagecore-dmx", 4096, nullptr, 10, nullptr) !=
+      pdPASS) {
+    hold_safe_failure("DMX task creation failed");
   }
 
-  TickType_t last_wake = xTaskGetTickCount();
-  while (true) {
-    // Continuous DMX output is independent of future Wi-Fi/runtime work.
-    // Until an authenticated StageCore command is implemented, all slots stay 0.
-    dmx_send_num(kDmxPort, kFrameBytes);
-    dmx_wait_sent(kDmxPort, DMX_TIMEOUT_TICK);
-    vTaskDelayUntil(&last_wake, kFramePeriod);
+  stagecore::DeviceIdentity identity;
+  if (identity.LoadOrCreate() != ESP_OK) {
+    hold_safe_failure("persistent P-256 identity unavailable");
   }
+  ESP_LOGI(kTag, "device_id=%s", identity.device_id().c_str());
+
+  stagecore::DeviceConfig config;
+  if (stagecore::load_device_config(&config) != ESP_OK) {
+    hold_safe_failure("configuration storage unavailable");
+  }
+
+  const std::string fallback_name = default_display_name(identity.device_id());
+  if (!config.complete()) {
+    stagecore::run_provisioning_portal(identity.device_id(), fallback_name);
+  }
+
+  if (stagecore::connect_station(config.wifi_ssid, config.wifi_password, 30000) !=
+      ESP_OK) {
+    stagecore::run_provisioning_portal(identity.device_id(),
+                                       config.display_name.empty()
+                                           ? fallback_name
+                                           : config.display_name);
+  }
+
+  ESP_LOGI(kTag, "provisioned for project %s as %s",
+           config.project_id.c_str(), config.display_name.c_str());
+  ESP_LOGI(kTag,
+           "network foundation ready; Hub discovery/pairing is the next sub-slice");
+
+  while (true) vTaskDelay(pdMS_TO_TICKS(1000));
 }
