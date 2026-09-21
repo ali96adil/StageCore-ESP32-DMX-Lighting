@@ -3,6 +3,7 @@ idf_component_register(
         "main.cpp"
         "command_contract.cpp"
         "assignment_v2.cpp"
+        "assignment_epoch_store.cpp"
         "config_store.cpp"
         "device_identity.cpp"
         "hub_discovery.cpp"
