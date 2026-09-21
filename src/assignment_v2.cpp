@@ -13,6 +13,10 @@ bool normalized(const std::string &value) {
 
 }  // namespace
 
+bool valid_v2_wire_schema(double value) {
+  return std::isfinite(value) && value == 2.0;
+}
+
 bool allow_epoch_cache_update(const EpochCache &stored,
                               const EpochCache &candidate) {
   if (candidate.epoch == 0 || candidate.epoch > kMaxPersistentEpoch ||
