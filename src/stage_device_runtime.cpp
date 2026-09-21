@@ -336,7 +336,8 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
   bool ok = cJSON_IsString(type) && type->valuestring != nullptr &&
-            cJSON_IsNumber(schema) && schema->valueint == 2 &&
+            cJSON_IsNumber(schema) &&
+            assignment_v2::valid_v2_wire_schema(schema->valuedouble) &&
             cJSON_IsString(device) && device->valuestring != nullptr &&
             context->device_id == device->valuestring;
   if (ok && std::strcmp(type->valuestring, "assignment.state") == 0) {
@@ -551,6 +552,7 @@ esp_err_t process_pending_blackout(RuntimeContext *context,
       positive_wire_integer(root, "assignment_epoch", &epoch) &&
       epoch == context->assignment_epoch.load() &&
       positive_wire_integer(root, "connection_generation", &generation) &&
+      generation == context->connection_generation &&
       positive_wire_integer(root, "expected_channels", &channels) &&
       channels == kPhysicalDMXChannels &&
       cJSON_IsString(transfer) && transfer->valuestring != nullptr &&
