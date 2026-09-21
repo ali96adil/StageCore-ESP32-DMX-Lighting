@@ -495,6 +495,78 @@ esp_err_t send_text(esp_websocket_client_handle_t client,
   return sent == static_cast<int>(message.size()) ? ESP_OK : ESP_FAIL;
 }
 
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+esp_err_t process_pending_blackout(RuntimeContext *context,
+                                   esp_websocket_client_handle_t client) {
+  if (context == nullptr || context->command_lock == nullptr || client == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  std::string frame;
+  if (xSemaphoreTake(context->command_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  frame.swap(context->pending_blackout_frame);
+  xSemaphoreGive(context->command_lock);
+  xEventGroupClearBits(context->events, kBlackoutBit);
+  if (frame.empty()) return ESP_ERR_INVALID_STATE;
+
+  cJSON *root = cJSON_ParseWithLength(frame.data(), frame.size());
+  if (root == nullptr) return ESP_ERR_INVALID_RESPONSE;
+  const cJSON *transfer = cJSON_GetObjectItemCaseSensitive(root, "transfer_id");
+  const cJSON *nonce = cJSON_GetObjectItemCaseSensitive(root, "challenge");
+  int64_t epoch = 0;
+  int64_t generation = 0;
+  int64_t channels = 0;
+  const bool scope_ok = context->assignment_epoch.load() > 0 &&
+      positive_wire_integer(root, "assignment_epoch", &epoch) &&
+      epoch == context->assignment_epoch.load() &&
+      positive_wire_integer(root, "connection_generation", &generation) &&
+      positive_wire_integer(root, "expected_channels", &channels) &&
+      channels == kPhysicalDMXChannels &&
+      cJSON_IsString(transfer) && transfer->valuestring != nullptr &&
+      std::strlen(transfer->valuestring) == 36 &&
+      canonical_hex_nonce(nonce);
+  if (!scope_ok) {
+    cJSON_Delete(root);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  // Apply the ordinary logical failsafe (cancel fades, identify and queued
+  // commands), then explicitly zero ALL 12 physical DMX slots and wait for
+  // output-task confirmation. Do not claim hardware-independent darkness.
+  esp_err_t err = lighting_blackout(true);
+  if (err == ESP_OK) err = lighting_output_blackout_immediate();
+  if (err != ESP_OK || !lighting_output_dmx_healthy()) {
+    cJSON_Delete(root);
+    return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;  // no forged ACK
+  }
+  cJSON *ack = cJSON_CreateObject();
+  cJSON *levels = cJSON_CreateArray();
+  if (ack == nullptr || levels == nullptr) {
+    if (ack != nullptr) cJSON_Delete(ack);
+    if (levels != nullptr) cJSON_Delete(levels);
+    cJSON_Delete(root);
+    return ESP_ERR_NO_MEM;
+  }
+  cJSON_AddStringToObject(ack, "type", "assignment.blackout_ack");
+  cJSON_AddNumberToObject(ack, "schema_version", 2);
+  cJSON_AddStringToObject(ack, "device_id", context->device_id.c_str());
+  cJSON_AddStringToObject(ack, "transfer_id", transfer->valuestring);
+  cJSON_AddNumberToObject(ack, "assignment_epoch", static_cast<double>(epoch));
+  cJSON_AddNumberToObject(ack, "connection_generation", static_cast<double>(generation));
+  cJSON_AddStringToObject(ack, "challenge", nonce->valuestring);
+  cJSON_AddBoolToObject(ack, "blackout", true);
+  for (int i = 0; i < kPhysicalDMXChannels; ++i) {
+    cJSON_AddItemToArray(levels, cJSON_CreateNumber(0));
+  }
+  cJSON_AddItemToObject(ack, "channel_levels", levels);
+  const std::string payload = print_json(ack);
+  cJSON_Delete(ack);
+  cJSON_Delete(root);
+  return send_text(client, payload);
+}
+#endif
+
 std::string completed_result(const std::string &device_id,
                              const std::string &command_id,
                              cJSON *payload) {
@@ -1008,8 +1080,16 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
     goto cleanup;
   }
 
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  ESP_LOGW(kTag, "v2 Hub assignment received; project commands disabled");
+  // An assignment.state never enables the DMX output. Hold failsafe until
+  // a distinct authenticated challenge is explicitly requested.
+  err = lighting_blackout(true);
+  if (err != ESP_OK) goto cleanup;
+#else
   ESP_LOGI(kTag, "Stage Device runtime.ready accepted");
   lighting_runtime_authority_acquired();
+#endif
 
   {
     const std::string observation =
@@ -1018,15 +1098,23 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
     if (err != ESP_OK) goto cleanup;
   }
 
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  ESP_LOGW(kTag, "v2 output remains FAILSAFE; only assignment.blackout accepted");
+#else
   ESP_LOGI(kTag,
            "all seven lighting capabilities enabled; readiness=%s",
            runtime_readiness());
+#endif
 
   last_heartbeat_us = esp_timer_get_time();
   while (true) {
     bits = xEventGroupWaitBits(
         context.events,
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+        kDisconnectedBit | kProtocolErrorBit | kBlackoutBit,
+#else
         kDisconnectedBit | kProtocolErrorBit | kCommandBit,
+#endif
         pdFALSE, pdFALSE, pdMS_TO_TICKS(50));
     if (bits & kProtocolErrorBit) {
       err = ESP_ERR_INVALID_RESPONSE;
@@ -1040,6 +1128,12 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
       err = ESP_ERR_INVALID_STATE;
       break;
     }
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+    if (bits & kBlackoutBit) {
+      err = process_pending_blackout(&context, client);
+      if (err != ESP_OK) break;
+    }
+#else
     if (bits & kCommandBit) {
       err = process_pending_command(&context, client);
       if (err != ESP_OK) break;
@@ -1047,6 +1141,7 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
 
     err = flush_lighting_events(&context, client);
     if (err != ESP_OK) break;
+#endif
 
     const int64_t now_us = esp_timer_get_time();
     if (now_us - last_heartbeat_us >=
