@@ -8,6 +8,7 @@
 #include <string>
 
 #include "cJSON.h"
+#include "assignment_epoch_store.h"
 #include "command_contract.h"
 #include "lighting_contract.h"
 #include "lighting_configuration.h"
@@ -38,6 +39,7 @@ constexpr char kTag[] = "stagecore-runtime";
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
 constexpr char kProtocolVersion[] = "stagecore.device/2";
 constexpr EventBits_t kBlackoutBit = BIT5;
+constexpr EventBits_t kEpochReceiptBit = BIT6;
 constexpr int kPhysicalDMXChannels = 12;
 #else
 constexpr char kProtocolVersion[] = "stagecore.device/1";
@@ -62,6 +64,8 @@ struct RuntimeContext {
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
   std::string pending_blackout_frame;
   std::atomic<int64_t> assignment_epoch{0};
+  int64_t connection_generation = 0;
+  bool blocked_epoch = false;
 #endif
   std::string last_accepted_command_id;
   std::string last_applied_command_id;
@@ -340,7 +344,9 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     const cJSON *project = cJSON_GetObjectItemCaseSensitive(root, "project_id");
     const cJSON *blackout = cJSON_GetObjectItemCaseSensitive(root, "blackout_required");
     const cJSON *commands = cJSON_GetObjectItemCaseSensitive(root, "commands_enabled");
+    const cJSON *ack_required = cJSON_GetObjectItemCaseSensitive(root, "epoch_ack_required");
     int64_t epoch = 0;
+    int64_t generation = 0;
     const bool unassigned = cJSON_IsString(state) && state->valuestring &&
         std::strcmp(state->valuestring, "UNASSIGNED") == 0;
     const bool blocked = cJSON_IsString(state) && state->valuestring &&
@@ -350,10 +356,15 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     const bool project_blocked = cJSON_IsString(project) && project->valuestring &&
         project->valuestring[0] != '\0';
     ok = positive_wire_integer(root, "assignment_epoch", &epoch) &&
-         ((unassigned && project_unassigned) || (blocked && project_blocked)) &&
+         positive_wire_integer(root, "connection_generation", &generation) &&
+         ((unassigned && project_unassigned && ack_required == nullptr) ||
+          (blocked && project_blocked && epoch > 1 && cJSON_IsTrue(ack_required))) &&
          cJSON_IsTrue(blackout) && cJSON_IsFalse(commands) &&
          context->assignment_epoch.load() == 0;
     if (ok) {
+      context->project_id = blocked ? project->valuestring : "";
+      context->connection_generation = generation;
+      context->blocked_epoch = blocked;
       context->assignment_epoch.store(epoch);
       xEventGroupSetBits(context->events, kReadyBit);
     }
@@ -368,6 +379,7 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
          positive_wire_integer(root, "assignment_epoch", &epoch) &&
          epoch == context->assignment_epoch.load() &&
          positive_wire_integer(root, "connection_generation", &generation) &&
+         generation == context->connection_generation &&
          positive_wire_integer(root, "expected_channels", &channels) &&
          channels == kPhysicalDMXChannels &&
          cJSON_IsString(transfer) && transfer->valuestring &&
@@ -385,9 +397,27 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     } else {
       ok = false;
     }
+  } else if (ok && std::strcmp(type->valuestring, "assignment.epoch_ack_receipt") == 0) {
+    const cJSON *project = cJSON_GetObjectItemCaseSensitive(root, "project_id");
+    const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    const cJSON *persisted = cJSON_GetObjectItemCaseSensitive(root, "persisted");
+    const cJSON *commands = cJSON_GetObjectItemCaseSensitive(root, "commands_enabled");
+    int64_t epoch = 0;
+    int64_t generation = 0;
+    ok = context->blocked_epoch && context->assignment_epoch.load() > 1 &&
+         cJSON_IsString(project) && project->valuestring &&
+         context->project_id == project->valuestring &&
+         cJSON_IsString(state) && state->valuestring &&
+         std::strcmp(state->valuestring, "BLOCKED") == 0 &&
+         positive_wire_integer(root, "assignment_epoch", &epoch) &&
+         epoch == context->assignment_epoch.load() &&
+         positive_wire_integer(root, "connection_generation", &generation) &&
+         generation == context->connection_generation &&
+         cJSON_IsTrue(persisted) && cJSON_IsFalse(commands);
+    if (ok) xEventGroupSetBits(context->events, kEpochReceiptBit);
   } else {
-    // Never accept command.execute, runtime.ready, project assignment or
-    // an unsupported message in the blackout-only experimental image.
+    // Never accept command.execute, runtime.ready, project activation or
+    // unsupported messages in the blackout-only experimental image.
     ok = false;
   }
 #else
