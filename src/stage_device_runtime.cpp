@@ -597,6 +597,38 @@ esp_err_t process_pending_blackout(RuntimeContext *context,
 }
 #endif
 
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+std::string make_blocked_epoch_ack(const RuntimeContext &context) {
+  if (!context.blocked_epoch || context.project_id.size() != 36 ||
+      context.assignment_epoch.load() <= 1 || context.connection_generation <= 0) {
+    return {};
+  }
+  cJSON *root = cJSON_CreateObject();
+  cJSON *levels = cJSON_CreateArray();
+  if (root == nullptr || levels == nullptr) {
+    if (root != nullptr) cJSON_Delete(root);
+    if (levels != nullptr) cJSON_Delete(levels);
+    return {};
+  }
+  cJSON_AddStringToObject(root, "type", "assignment.epoch_ack");
+  cJSON_AddNumberToObject(root, "schema_version", 2);
+  cJSON_AddStringToObject(root, "device_id", context.device_id.c_str());
+  cJSON_AddStringToObject(root, "project_id", context.project_id.c_str());
+  cJSON_AddNumberToObject(root, "assignment_epoch",
+                          static_cast<double>(context.assignment_epoch.load()));
+  cJSON_AddNumberToObject(root, "connection_generation",
+                          static_cast<double>(context.connection_generation));
+  cJSON_AddBoolToObject(root, "blackout", true);
+  for (int i = 0; i < kPhysicalDMXChannels; ++i) {
+    cJSON_AddItemToArray(levels, cJSON_CreateNumber(0));
+  }
+  cJSON_AddItemToObject(root, "channel_levels", levels);
+  const std::string result = print_json(root);
+  cJSON_Delete(root);
+  return result;
+}
+#endif
+
 std::string completed_result(const std::string &device_id,
                              const std::string &command_id,
                              cJSON *payload) {
@@ -1112,10 +1144,40 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
   ESP_LOGW(kTag, "v2 Hub assignment received; project commands disabled");
-  // An assignment.state never enables the DMX output. Hold failsafe until
-  // a distinct authenticated challenge is explicitly requested.
+  // Neither a Hub assignment nor this software-zero report activates DMX
+  // channels. Always cancel fades/events and write all 12 physical slots to
+  // zero before persisting the Hub epoch or acknowledging it.
   err = lighting_blackout(true);
-  if (err != ESP_OK) goto cleanup;
+  if (err == ESP_OK) err = lighting_output_blackout_immediate();
+  if (err != ESP_OK || !lighting_output_dmx_healthy()) {
+    if (err == ESP_OK) err = ESP_ERR_INVALID_STATE;
+    goto cleanup;
+  }
+  err = assignment_v2::confirm_zero_and_persist_epoch(
+      static_cast<uint64_t>(context.assignment_epoch.load()),
+      context.blocked_epoch ? assignment_v2::PersistedState::kBlocked
+                            : assignment_v2::PersistedState::kUnassigned,
+      context.project_id);
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "Hub v2 epoch rolled back, changed Project or NVS failed; keep blackout");
+    goto cleanup;
+  }
+  if (context.blocked_epoch) {
+    err = send_text(client, make_blocked_epoch_ack(context));
+    if (err != ESP_OK) goto cleanup;
+    // Receipt only confirms that Hub persisted our software-zero report.
+    // It does not authorize a snapshot, lighting commands or ACTIVE state.
+    bits = xEventGroupWaitBits(
+        context.events,
+        kEpochReceiptBit | kDisconnectedBit | kProtocolErrorBit,
+        pdFALSE, pdFALSE, pdMS_TO_TICKS(kReadyTimeoutMS));
+    if ((bits & kEpochReceiptBit) == 0) {
+      err = (bits & kProtocolErrorBit) ? ESP_ERR_INVALID_RESPONSE
+                                       : ESP_ERR_TIMEOUT;
+      goto cleanup;
+    }
+    ESP_LOGI(kTag, "Hub persisted software-zero ACK for BLOCKED epoch");
+  }
 #else
   ESP_LOGI(kTag, "Stage Device runtime.ready accepted");
   lighting_runtime_authority_acquired();
