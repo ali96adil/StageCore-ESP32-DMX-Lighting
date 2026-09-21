@@ -39,3 +39,6 @@ jobs:
 
       - name: Build experimental v2 blackout-only image (do not flash)
         run: pio run -e esp32dev-v2-experimental
+
+      - name: Build opt-in experimental v2 software probe image (do not flash)
+        run: pio run -e esp32dev-v2-probe-experimental
