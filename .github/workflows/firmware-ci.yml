@@ -24,6 +24,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Test dormant v2 assignment contract (host)
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
+            src/assignment_v2.cpp tests/assignment_v2_test.cpp \
+            -o /tmp/stagecore-assignment-v2-test
+          /tmp/stagecore-assignment-v2-test
+
       - name: Install PlatformIO
         run: python -m pip install --disable-pip-version-check platformio==6.2.0
 
