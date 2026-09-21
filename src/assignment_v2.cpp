@@ -1,6 +1,7 @@
 #include "assignment_v2.h"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace stagecore::assignment_v2 {
