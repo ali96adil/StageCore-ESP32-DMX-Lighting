@@ -62,6 +62,31 @@ bool wait_for_generation(uint32_t target, TickType_t timeout) {
 void dmx_task(void *) {
   TickType_t last_wake = xTaskGetTickCount();
   std::array<uint8_t, DMX_PACKET_SIZE> local{};
+  constexpr TickType_t kDiagnosticInterval = pdMS_TO_TICKS(60000);
+  TickType_t last_failure_log = 0;
+  uint32_t consecutive_failures = 0;
+  bool failure_reported = false;
+
+  // Diagnostics only: never alter the DMX frame, physical levels, timing,
+  // failsafe, or g_healthy semantics when classifying a failed TX attempt.
+  const auto record_failure = [&](const char *stage, size_t written,
+                                  size_t sent, bool wait_done) {
+    if (consecutive_failures != UINT32_MAX) ++consecutive_failures;
+    const TickType_t now = xTaskGetTickCount();
+    if (!failure_reported ||
+        static_cast<TickType_t>(now - last_failure_log) >=
+            kDiagnosticInterval) {
+      ESP_LOGW(kTag,
+               "DMX TX unhealthy stage=%s written=%u sent=%u wait_done=%d "
+               "expected=%u consecutive_failures=%lu",
+               stage, static_cast<unsigned>(written),
+               static_cast<unsigned>(sent), static_cast<int>(wait_done),
+               static_cast<unsigned>(kFrameBytes),
+               static_cast<unsigned long>(consecutive_failures));
+      last_failure_log = now;
+    }
+    failure_reported = true;
+  };
 
   while (true) {
     uint32_t generation = 0;
@@ -71,6 +96,7 @@ void dmx_task(void *) {
       xSemaphoreGive(g_frame_lock);
     } else {
       g_healthy.store(false);
+      record_failure("frame_lock", 0, 0, false);
       vTaskDelayUntil(&last_wake, kFramePeriod);
       continue;
     }
@@ -79,11 +105,25 @@ void dmx_task(void *) {
         dmx_write(kDmxPort, local.data(), kFrameBytes);
     const size_t sent =
         written == kFrameBytes ? dmx_send_num(kDmxPort, kFrameBytes) : 0;
-    const bool completed =
+    const bool wait_done =
         sent == kFrameBytes && dmx_wait_sent(kDmxPort, DMX_TIMEOUT_TICK);
+    const bool completed = sent == kFrameBytes && wait_done;
 
     g_healthy.store(completed);
-    if (completed) g_sent_generation.store(generation);
+    if (completed) {
+      g_sent_generation.store(generation);
+      if (failure_reported) {
+        ESP_LOGI(kTag, "DMX TX recovered after %lu failed frames",
+                 static_cast<unsigned long>(consecutive_failures));
+        consecutive_failures = 0;
+        failure_reported = false;
+      }
+    } else {
+      const char *stage = written != kFrameBytes
+                              ? "write"
+                              : sent != kFrameBytes ? "send" : "wait_sent";
+      record_failure(stage, written, sent, wait_done);
+    }
 
     vTaskDelayUntil(&last_wake, kFramePeriod);
   }
