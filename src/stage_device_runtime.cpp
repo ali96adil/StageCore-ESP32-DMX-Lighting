@@ -295,6 +295,33 @@ std::string make_observation(const VerifiedHub &hub,
   return result;
 }
 
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+bool positive_wire_integer(const cJSON *root, const char *key, int64_t *out) {
+  const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, key);
+  if (!cJSON_IsNumber(value) || !std::isfinite(value->valuedouble) ||
+      value->valuedouble < 1.0 || value->valuedouble > 9007199254740991.0 ||
+      std::floor(value->valuedouble) != value->valuedouble ||
+      out == nullptr) {
+    return false;
+  }
+  *out = static_cast<int64_t>(value->valuedouble);
+  return true;
+}
+
+bool canonical_hex_nonce(const cJSON *nonce) {
+  if (!cJSON_IsString(nonce) || nonce->valuestring == nullptr ||
+      std::strlen(nonce->valuestring) != 64) {
+    return false;
+  }
+  for (const char *p = nonce->valuestring; *p != '\0'; ++p) {
+    if (!(*p >= '0' && *p <= '9') && !(*p >= 'a' && *p <= 'f')) {
+      return false;
+    }
+  }
+  return true;
+}
+#endif
+
 bool handle_complete_text(RuntimeContext *context, const std::string &text) {
   cJSON *root = cJSON_ParseWithLength(text.data(), text.size());
   if (root == nullptr) return false;
@@ -303,6 +330,67 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
   const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema_version");
   const cJSON *device = cJSON_GetObjectItemCaseSensitive(root, "device_id");
 
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  bool ok = cJSON_IsString(type) && type->valuestring != nullptr &&
+            cJSON_IsNumber(schema) && schema->valueint == 2 &&
+            cJSON_IsString(device) && device->valuestring != nullptr &&
+            context->device_id == device->valuestring;
+  if (ok && std::strcmp(type->valuestring, "assignment.state") == 0) {
+    const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    const cJSON *project = cJSON_GetObjectItemCaseSensitive(root, "project_id");
+    const cJSON *blackout = cJSON_GetObjectItemCaseSensitive(root, "blackout_required");
+    const cJSON *commands = cJSON_GetObjectItemCaseSensitive(root, "commands_enabled");
+    int64_t epoch = 0;
+    const bool unassigned = cJSON_IsString(state) && state->valuestring &&
+        std::strcmp(state->valuestring, "UNASSIGNED") == 0;
+    const bool blocked = cJSON_IsString(state) && state->valuestring &&
+        std::strcmp(state->valuestring, "BLOCKED") == 0;
+    const bool project_unassigned = project == nullptr ||
+        (cJSON_IsString(project) && project->valuestring && project->valuestring[0] == '\0');
+    const bool project_blocked = cJSON_IsString(project) && project->valuestring &&
+        project->valuestring[0] != '\0';
+    ok = positive_wire_integer(root, "assignment_epoch", &epoch) &&
+         ((unassigned && project_unassigned) || (blocked && project_blocked)) &&
+         cJSON_IsTrue(blackout) && cJSON_IsFalse(commands) &&
+         context->assignment_epoch.load() == 0;
+    if (ok) {
+      context->assignment_epoch.store(epoch);
+      xEventGroupSetBits(context->events, kReadyBit);
+    }
+  } else if (ok && std::strcmp(type->valuestring, "assignment.blackout") == 0) {
+    int64_t epoch = 0;
+    int64_t generation = 0;
+    int64_t channels = 0;
+    const cJSON *transfer = cJSON_GetObjectItemCaseSensitive(root, "transfer_id");
+    const cJSON *nonce = cJSON_GetObjectItemCaseSensitive(root, "challenge");
+    const cJSON *required = cJSON_GetObjectItemCaseSensitive(root, "blackout_required");
+    ok = context->assignment_epoch.load() > 0 &&
+         positive_wire_integer(root, "assignment_epoch", &epoch) &&
+         epoch == context->assignment_epoch.load() &&
+         positive_wire_integer(root, "connection_generation", &generation) &&
+         positive_wire_integer(root, "expected_channels", &channels) &&
+         channels == kPhysicalDMXChannels &&
+         cJSON_IsString(transfer) && transfer->valuestring &&
+         std::strlen(transfer->valuestring) == 36 &&
+         canonical_hex_nonce(nonce) && cJSON_IsTrue(required);
+    if (ok && context->command_lock != nullptr &&
+        xSemaphoreTake(context->command_lock, 0) == pdTRUE) {
+      if (!context->pending_blackout_frame.empty()) {
+        ok = false;
+      } else {
+        context->pending_blackout_frame = text;
+        xEventGroupSetBits(context->events, kBlackoutBit);
+      }
+      xSemaphoreGive(context->command_lock);
+    } else {
+      ok = false;
+    }
+  } else {
+    // Never accept command.execute, runtime.ready, project assignment or
+    // an unsupported message in the blackout-only experimental image.
+    ok = false;
+  }
+#else
   bool ok = cJSON_IsString(type) && type->valuestring != nullptr &&
             cJSON_IsNumber(schema) && schema->valueint == 1;
 
@@ -333,6 +421,7 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     ESP_LOGE(kTag, "unexpected Stage Device runtime frame");
     ok = false;
   }
+#endif
 
   cJSON_Delete(root);
   return ok;
