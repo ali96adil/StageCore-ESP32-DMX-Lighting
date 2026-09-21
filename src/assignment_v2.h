@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -57,6 +58,19 @@ struct BlackoutAck {
   bool blackout = false;
   std::vector<uint8_t> channel_levels;
 };
+
+// A non-authoritative NVS cache is used only to reject rollback or changing
+// Project/state at an already recorded epoch after reboot. A higher epoch is
+// still never activation authority: only an authenticated Hub reply followed
+// by all-channel software-zero confirmation may persist it.
+struct EpochCache {
+  uint64_t epoch = 0;
+  State state = State::kUnassigned;
+  std::array<uint8_t, 32> project_digest{};
+};
+
+bool allow_epoch_cache_update(const EpochCache &stored,
+                              const EpochCache &candidate);
 
 // These predicates assume a caller has FIRST verified Hub authentication and
 // message origin. They MUST NOT be used to promote unauthenticated mDNS, a
