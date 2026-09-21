@@ -9,6 +9,7 @@
 
 #include "cJSON.h"
 #include "assignment_epoch_store.h"
+#include "assignment_v2.h"
 #include "command_contract.h"
 #include "lighting_contract.h"
 #include "lighting_configuration.h"
