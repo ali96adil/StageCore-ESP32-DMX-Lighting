@@ -44,7 +44,9 @@ class BlackoutEvidenceTests(unittest.TestCase):
         self.assertFalse(report["log_signals"]["v2_blackout_only"])
         report = tool.inspect_log(GOOD.replace(b"EXPERIMENTAL v2: projectless, blackout-only image",
                                               b"provisioned for project A as node"))
-        self.assertEqual(report["software_log_status"], "INCOMPLETE")
+        self.assertEqual(report["software_log_status"], "V1_SOFTWARE_LOG_CAPTURED")
+        self.assertFalse(report["physical_dmx_decoder_verified"])
+        self.assertEqual(report["physical_qualification"], "PENDING_PHYSICAL")
 
     def test_self_reported_failure_or_pin_mismatch_blocks_log(self):
         bad = tool.inspect_log(GOOD + b"E: failsafe blackout failed after runtime exit: ESP_FAIL\n")
@@ -79,6 +81,24 @@ class BlackoutEvidenceTests(unittest.TestCase):
             self.assertEqual(payload["physical_qualification"], "PENDING_PHYSICAL")
             with self.assertRaises(SystemExit):
                 tool.main(["--log", str(log), "--out", str(result)])
+
+    def test_serial_capture_requires_write_once_raw_log(self):
+        with self.assertRaises(SystemExit):
+            tool.main(["--port", "/dev/cu.usbserial-0001", "--out", "evidence.json"])
+
+    def test_v1_baseline_does_not_qualify_experimental_v2(self):
+        raw = GOOD.replace(b"EXPERIMENTAL v2: projectless, blackout-only image",
+                           b"provisioned for project A as node")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            log = path / "v1.log"
+            report_path = path / "v1.json"
+            log.write_bytes(raw)
+            self.assertEqual(tool.main(["--log", str(log), "--out", str(report_path)]), 0)
+            result = json.loads(report_path.read_text())
+            self.assertEqual(result["software_log_status"], "V1_SOFTWARE_LOG_CAPTURED")
+            self.assertEqual(result["physical_qualification"], "PENDING_PHYSICAL")
+            self.assertFalse(result["commands_enabled"])
 
     def test_cli_incomplete_returns_nonzero_but_writes_replayable_report(self):
         with tempfile.TemporaryDirectory() as directory:
