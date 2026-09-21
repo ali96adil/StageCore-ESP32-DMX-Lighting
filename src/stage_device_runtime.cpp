@@ -1,5 +1,8 @@
 #include "stage_device_runtime.h"
 
+#include <atomic>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -24,11 +27,21 @@
 #define STAGECORE_FW_VERSION "0.2.0-dev"
 #endif
 
+#ifndef STAGECORE_EXPERIMENTAL_DEVICE_V2
+#define STAGECORE_EXPERIMENTAL_DEVICE_V2 0
+#endif
+
 namespace stagecore {
 namespace {
 
 constexpr char kTag[] = "stagecore-runtime";
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+constexpr char kProtocolVersion[] = "stagecore.device/2";
+constexpr EventBits_t kBlackoutBit = BIT5;
+constexpr int kPhysicalDMXChannels = 12;
+#else
 constexpr char kProtocolVersion[] = "stagecore.device/1";
+#endif
 constexpr char kProfileID[] = "stagecore.esp32-dmx-lighting-node";
 constexpr EventBits_t kConnectedBit = BIT0;
 constexpr EventBits_t kReadyBit = BIT1;
@@ -46,6 +59,10 @@ struct RuntimeContext {
   std::string project_id;
   std::string inbound;
   std::string pending_command_frame;
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  std::string pending_blackout_frame;
+  std::atomic<int64_t> assignment_epoch{0};
+#endif
   std::string last_accepted_command_id;
   std::string last_applied_command_id;
   int expected_payload = 0;
@@ -92,6 +109,10 @@ cJSON *capabilities_json() {
 }
 
 const char *runtime_readiness() {
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  // Assignment does not yet activate a Project snapshot or project commands.
+  return "BLOCKER";
+#endif
   if (!lighting_configuration_ready() ||
       !lighting_output_dmx_healthy() ||
       lighting_authority() == "FAILSAFE") {
@@ -212,7 +233,9 @@ std::string make_hello(const VerifiedHub &hub,
   cJSON_AddStringToObject(root, "type", "device.hello");
   cJSON_AddNumberToObject(root, "schema_version", 1);
   cJSON_AddStringToObject(root, "device_id", identity.device_id().c_str());
+#if !STAGECORE_EXPERIMENTAL_DEVICE_V2
   cJSON_AddStringToObject(root, "project_id", config.project_id.c_str());
+#endif
   cJSON_AddStringToObject(root, "profile_id", kProfileID);
   cJSON_AddStringToObject(root, "device_kind", "GENERIC");
   cJSON_AddStringToObject(root, "display_name", config.display_name.c_str());
@@ -248,7 +271,11 @@ std::string make_observation(const VerifiedHub &hub,
   if (root == nullptr) return {};
 
   cJSON_AddStringToObject(root, "type", "device.observation");
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  cJSON_AddNumberToObject(root, "schema_version", 2);
+#else
   cJSON_AddNumberToObject(root, "schema_version", 1);
+#endif
   cJSON_AddStringToObject(root, "device_id", identity.device_id().c_str());
   cJSON_AddStringToObject(root, "readiness", runtime_readiness());
 
