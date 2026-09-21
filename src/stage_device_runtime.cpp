@@ -14,6 +14,7 @@
 #include "lighting_contract.h"
 #include "lighting_configuration.h"
 #include "lighting_output.h"
+#include "state_probe_v2.h"
 #include "trusted_clock.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -428,14 +429,18 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     int64_t channels = 0;
     const cJSON *nonce = cJSON_GetObjectItemCaseSensitive(root, "challenge");
     const cJSON *commands = cJSON_GetObjectItemCaseSensitive(root, "commands_enabled");
-    ok = context->assignment_epoch.load() > 0 &&
-         positive_wire_integer(root, "assignment_epoch", &epoch) &&
-         epoch == context->assignment_epoch.load() &&
+    ok = positive_wire_integer(root, "assignment_epoch", &epoch) &&
          positive_wire_integer(root, "connection_generation", &generation) &&
-         generation == context->connection_generation &&
          positive_wire_integer(root, "expected_channels", &channels) &&
-         channels == kPhysicalDMXChannels &&
-         canonical_hex_nonce(nonce) && cJSON_IsFalse(commands);
+         channels == kPhysicalDMXChannels && canonical_hex_nonce(nonce) &&
+         cJSON_IsFalse(commands) &&
+         state_probe_v2::valid_request(
+             {context->device_id, static_cast<uint64_t>(epoch),
+              static_cast<uint64_t>(generation), nonce->valuestring,
+              static_cast<uint16_t>(channels), false},
+             {context->device_id,
+              static_cast<uint64_t>(context->assignment_epoch.load()),
+              static_cast<uint64_t>(context->connection_generation)});
     if (ok && context->command_lock != nullptr &&
         xSemaphoreTake(context->command_lock, 0) == pdTRUE) {
       if (!context->pending_blackout_frame.empty() ||
@@ -672,13 +677,19 @@ esp_err_t process_pending_probe(RuntimeContext *context,
   int64_t epoch = 0;
   int64_t generation = 0;
   int64_t channels = 0;
-  const bool scope_ok = context->assignment_epoch.load() > 0 &&
-      positive_wire_integer(request, "assignment_epoch", &epoch) &&
-      epoch == context->assignment_epoch.load() &&
+  const cJSON *commands = cJSON_GetObjectItemCaseSensitive(request, "commands_enabled");
+  const bool scope_ok = positive_wire_integer(request, "assignment_epoch", &epoch) &&
       positive_wire_integer(request, "connection_generation", &generation) &&
-      generation == context->connection_generation &&
       positive_wire_integer(request, "expected_channels", &channels) &&
-      channels == kPhysicalDMXChannels && canonical_hex_nonce(nonce);
+      channels == kPhysicalDMXChannels && canonical_hex_nonce(nonce) &&
+      cJSON_IsFalse(commands) &&
+      state_probe_v2::valid_request(
+          {context->device_id, static_cast<uint64_t>(epoch),
+           static_cast<uint64_t>(generation), nonce->valuestring,
+           static_cast<uint16_t>(channels), false},
+          {context->device_id,
+           static_cast<uint64_t>(context->assignment_epoch.load()),
+           static_cast<uint64_t>(context->connection_generation)});
   if (!scope_ok) {
     cJSON_Delete(request);
     return ESP_ERR_INVALID_RESPONSE;
@@ -688,13 +699,12 @@ esp_err_t process_pending_probe(RuntimeContext *context,
   // measurement and never grants Project/ACTIVE/command authority.
   std::vector<uint8_t> slots;
   const esp_err_t read_error = lighting_output_read_slots(&slots);
-  if (read_error != ESP_OK || slots.size() != kPhysicalDMXChannels) {
+  const auto sample = state_probe_v2::classify_sample(
+      slots, read_error == ESP_OK && lighting_output_dmx_healthy(),
+      lighting_authority() == "FAILSAFE");
+  if (!sample.valid) {
     cJSON_Delete(request);
     return read_error != ESP_OK ? read_error : ESP_ERR_INVALID_STATE;
-  }
-  bool all_zero = true;
-  for (uint8_t level : slots) {
-    if (level != 0) all_zero = false;
   }
   cJSON *report = cJSON_CreateObject();
   cJSON *levels = cJSON_CreateArray();
@@ -710,10 +720,9 @@ esp_err_t process_pending_probe(RuntimeContext *context,
   cJSON_AddNumberToObject(report, "assignment_epoch", static_cast<double>(epoch));
   cJSON_AddNumberToObject(report, "connection_generation", static_cast<double>(generation));
   cJSON_AddStringToObject(report, "challenge", nonce->valuestring);
-  cJSON_AddBoolToObject(report, "levels_known", true);
-  cJSON_AddBoolToObject(report, "blackout",
-                        all_zero && lighting_authority() == "FAILSAFE");
-  for (uint8_t level : slots) {
+  cJSON_AddBoolToObject(report, "levels_known", sample.levels_known);
+  cJSON_AddBoolToObject(report, "blackout", sample.blackout);
+  for (uint8_t level : sample.channel_levels) {
     cJSON_AddItemToArray(levels, cJSON_CreateNumber(level));
   }
   cJSON_AddItemToObject(report, "channel_levels", levels);
