@@ -81,6 +81,38 @@ int main() {
   assert(!verify_blackout(max_epoch, overflow, max_ack, &next));
   assert(!validate({"node", "project-A", kMaxPersistentEpoch + 1, State::kActive, ""}));
 
+  // NVS rollback/cache constraints: persisting Hub epoch is a local
+  // anti-rollback check, not Project authority or physical DMX proof.
+  EpochCache empty{};
+  EpochCache first{};
+  first.epoch = 1;
+  first.state = State::kUnassigned;
+  first.project_digest.fill(0x11);
+  assert(allow_epoch_cache_update(empty, first));
+  assert(allow_epoch_cache_update(first, first));
+  auto stale = first;
+  stale.epoch = 0;
+  assert(!allow_epoch_cache_update(first, stale));
+  auto fake_project = first;
+  fake_project.project_digest[0] ^= 0xff;
+  assert(!allow_epoch_cache_update(first, fake_project));
+  auto fake_state = first;
+  fake_state.state = State::kBlocked;
+  assert(!allow_epoch_cache_update(first, fake_state));
+  auto transferred = first;
+  transferred.epoch = 2;
+  transferred.state = State::kBlocked;
+  transferred.project_digest.fill(0x22);
+  assert(allow_epoch_cache_update(first, transferred));
+  assert(!allow_epoch_cache_update(transferred, first));
+  assert(!allow_epoch_cache_update(transferred, fake_state));
+  auto max_cache = transferred;
+  max_cache.epoch = kMaxPersistentEpoch + 1;
+  assert(!allow_epoch_cache_update(transferred, max_cache));
+  auto invalid_cache = transferred;
+  invalid_cache.state = State::kLegacy;
+  assert(!allow_epoch_cache_update(transferred, invalid_cache));
+
   std::cout << "assignment_v2 pure contract tests PASS\n";
   return 0;
 }
