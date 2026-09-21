@@ -12,6 +12,29 @@ bool normalized(const std::string &value) {
 
 }  // namespace
 
+bool allow_epoch_cache_update(const EpochCache &stored,
+                              const EpochCache &candidate) {
+  if (candidate.epoch == 0 || candidate.epoch > kMaxPersistentEpoch ||
+      (candidate.state != State::kUnassigned &&
+       candidate.state != State::kBlocked) ||
+      stored.epoch > kMaxPersistentEpoch ||
+      (stored.epoch != 0 && stored.state != State::kUnassigned &&
+       stored.state != State::kBlocked)) {
+    return false;
+  }
+  if (stored.epoch == 0) {
+    // Fresh v2 image has no committed epoch. Only a verified Hub reply may
+    // supply a candidate, followed by software-confirmed output blackout.
+    return true;
+  }
+  if (candidate.epoch < stored.epoch) return false;
+  if (candidate.epoch == stored.epoch) {
+    return candidate.state == stored.state &&
+           candidate.project_digest == stored.project_digest;
+  }
+  return true;
+}
+
 bool validate(const Assignment &assignment) {
   if (assignment.device_id.empty() || !normalized(assignment.device_id) ||
       assignment.epoch == 0 || assignment.epoch > kMaxPersistentEpoch ||
