@@ -33,6 +33,10 @@
 #define STAGECORE_EXPERIMENTAL_DEVICE_V2 0
 #endif
 
+#ifndef STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+#define STAGECORE_EXPERIMENTAL_V2_STATE_PROBE 0
+#endif
+
 namespace stagecore {
 namespace {
 
@@ -41,6 +45,9 @@ constexpr char kTag[] = "stagecore-runtime";
 constexpr char kProtocolVersion[] = "stagecore.device/2";
 constexpr EventBits_t kBlackoutBit = BIT5;
 constexpr EventBits_t kEpochReceiptBit = BIT6;
+#if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+constexpr EventBits_t kProbeBit = BIT7;
+#endif
 constexpr int kPhysicalDMXChannels = 12;
 #else
 constexpr char kProtocolVersion[] = "stagecore.device/1";
@@ -64,6 +71,9 @@ struct RuntimeContext {
   std::string pending_command_frame;
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
   std::string pending_blackout_frame;
+#if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+  std::string pending_probe_frame;
+#endif
   std::atomic<int64_t> assignment_epoch{0};
   int64_t connection_generation = 0;
   bool blocked_epoch = false;
@@ -110,6 +120,14 @@ cJSON *capabilities_json() {
       return nullptr;
     }
   }
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+  cJSON *probe = cJSON_CreateString("lighting.state_probe/1");
+  if (probe == nullptr || !cJSON_AddItemToArray(array, probe)) {
+    if (probe != nullptr) cJSON_Delete(probe);
+    cJSON_Delete(array);
+    return nullptr;
+  }
+#endif
   return array;
 }
 
@@ -389,7 +407,11 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
          canonical_hex_nonce(nonce) && cJSON_IsTrue(required);
     if (ok && context->command_lock != nullptr &&
         xSemaphoreTake(context->command_lock, 0) == pdTRUE) {
-      if (!context->pending_blackout_frame.empty()) {
+      if (!context->pending_blackout_frame.empty()
+#if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+          || !context->pending_probe_frame.empty()
+#endif
+          ) {
         ok = false;
       } else {
         context->pending_blackout_frame = text;
@@ -399,6 +421,35 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     } else {
       ok = false;
     }
+#if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+  } else if (ok && std::strcmp(type->valuestring, "lighting.state_probe") == 0) {
+    int64_t epoch = 0;
+    int64_t generation = 0;
+    int64_t channels = 0;
+    const cJSON *nonce = cJSON_GetObjectItemCaseSensitive(root, "challenge");
+    const cJSON *commands = cJSON_GetObjectItemCaseSensitive(root, "commands_enabled");
+    ok = context->assignment_epoch.load() > 0 &&
+         positive_wire_integer(root, "assignment_epoch", &epoch) &&
+         epoch == context->assignment_epoch.load() &&
+         positive_wire_integer(root, "connection_generation", &generation) &&
+         generation == context->connection_generation &&
+         positive_wire_integer(root, "expected_channels", &channels) &&
+         channels == kPhysicalDMXChannels &&
+         canonical_hex_nonce(nonce) && cJSON_IsFalse(commands);
+    if (ok && context->command_lock != nullptr &&
+        xSemaphoreTake(context->command_lock, 0) == pdTRUE) {
+      if (!context->pending_blackout_frame.empty() ||
+          !context->pending_probe_frame.empty()) {
+        ok = false;
+      } else {
+        context->pending_probe_frame = text;
+        xEventGroupSetBits(context->events, kProbeBit);
+      }
+      xSemaphoreGive(context->command_lock);
+    } else {
+      ok = false;
+    }
+#endif
   } else if (ok && std::strcmp(type->valuestring, "assignment.epoch_ack_receipt") == 0) {
     const cJSON *project = cJSON_GetObjectItemCaseSensitive(root, "project_id");
     const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
@@ -596,6 +647,79 @@ esp_err_t process_pending_blackout(RuntimeContext *context,
   const std::string payload = print_json(ack);
   cJSON_Delete(ack);
   cJSON_Delete(root);
+  return send_text(client, payload);
+}
+#endif
+
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+esp_err_t process_pending_probe(RuntimeContext *context,
+                                esp_websocket_client_handle_t client) {
+  if (context == nullptr || context->command_lock == nullptr || client == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  std::string frame;
+  if (xSemaphoreTake(context->command_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  frame.swap(context->pending_probe_frame);
+  xSemaphoreGive(context->command_lock);
+  xEventGroupClearBits(context->events, kProbeBit);
+  if (frame.empty()) return ESP_ERR_INVALID_STATE;
+
+  cJSON *request = cJSON_ParseWithLength(frame.data(), frame.size());
+  if (request == nullptr) return ESP_ERR_INVALID_RESPONSE;
+  const cJSON *nonce = cJSON_GetObjectItemCaseSensitive(request, "challenge");
+  int64_t epoch = 0;
+  int64_t generation = 0;
+  int64_t channels = 0;
+  const bool scope_ok = context->assignment_epoch.load() > 0 &&
+      positive_wire_integer(request, "assignment_epoch", &epoch) &&
+      epoch == context->assignment_epoch.load() &&
+      positive_wire_integer(request, "connection_generation", &generation) &&
+      generation == context->connection_generation &&
+      positive_wire_integer(request, "expected_channels", &channels) &&
+      channels == kPhysicalDMXChannels && canonical_hex_nonce(nonce);
+  if (!scope_ok) {
+    cJSON_Delete(request);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  // A logical output-task-backed report is not an independent DMX decoder
+  // measurement and never grants Project/ACTIVE/command authority.
+  std::vector<uint8_t> slots;
+  const esp_err_t read_error = lighting_output_read_slots(&slots);
+  if (read_error != ESP_OK || slots.size() != kPhysicalDMXChannels) {
+    cJSON_Delete(request);
+    return read_error != ESP_OK ? read_error : ESP_ERR_INVALID_STATE;
+  }
+  bool all_zero = true;
+  for (uint8_t level : slots) {
+    if (level != 0) all_zero = false;
+  }
+  cJSON *report = cJSON_CreateObject();
+  cJSON *levels = cJSON_CreateArray();
+  if (report == nullptr || levels == nullptr) {
+    if (report != nullptr) cJSON_Delete(report);
+    if (levels != nullptr) cJSON_Delete(levels);
+    cJSON_Delete(request);
+    return ESP_ERR_NO_MEM;
+  }
+  cJSON_AddStringToObject(report, "type", "lighting.state_report");
+  cJSON_AddNumberToObject(report, "schema_version", 2);
+  cJSON_AddStringToObject(report, "device_id", context->device_id.c_str());
+  cJSON_AddNumberToObject(report, "assignment_epoch", static_cast<double>(epoch));
+  cJSON_AddNumberToObject(report, "connection_generation", static_cast<double>(generation));
+  cJSON_AddStringToObject(report, "challenge", nonce->valuestring);
+  cJSON_AddBoolToObject(report, "levels_known", true);
+  cJSON_AddBoolToObject(report, "blackout",
+                        all_zero && lighting_authority() == "FAILSAFE");
+  for (uint8_t level : slots) {
+    cJSON_AddItemToArray(levels, cJSON_CreateNumber(level));
+  }
+  cJSON_AddItemToObject(report, "channel_levels", levels);
+  const std::string payload = print_json(report);
+  cJSON_Delete(report);
+  cJSON_Delete(request);
   return send_text(client, payload);
 }
 #endif
@@ -1206,7 +1330,11 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
     bits = xEventGroupWaitBits(
         context.events,
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-        kDisconnectedBit | kProtocolErrorBit | kBlackoutBit,
+        kDisconnectedBit | kProtocolErrorBit | kBlackoutBit
+#if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+        | kProbeBit
+#endif
+        ,
 #else
         kDisconnectedBit | kProtocolErrorBit | kCommandBit,
 #endif
@@ -1228,6 +1356,12 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
       err = process_pending_blackout(&context, client);
       if (err != ESP_OK) break;
     }
+#if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+    if (bits & kProbeBit) {
+      err = process_pending_probe(&context, client);
+      if (err != ESP_OK) break;
+    }
+#endif
 #else
     if (bits & kCommandBit) {
       err = process_pending_command(&context, client);
