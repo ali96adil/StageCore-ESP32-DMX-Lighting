@@ -3,10 +3,22 @@
 #include <cassert>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 
 using namespace stagecore::assignment_v2;
 
 int main() {
+  // Only an exact v2 JSON number is a valid experimental transport schema.
+  // cJSON.valueint would incorrectly accept 2.5 by integer truncation.
+  assert(valid_v2_wire_schema(2.0));
+  assert(!valid_v2_wire_schema(1.0));
+  assert(!valid_v2_wire_schema(3.0));
+  assert(!valid_v2_wire_schema(2.0000001));
+  assert(!valid_v2_wire_schema(2.5));
+  assert(!valid_v2_wire_schema(-2.0));
+  assert(!valid_v2_wire_schema(std::numeric_limits<double>::infinity()));
+  assert(!valid_v2_wire_schema(std::numeric_limits<double>::quiet_NaN()));
+
   const Assignment unassigned{"node", "", 1, State::kUnassigned, ""};
   assert(validate(unassigned));
   assert(!authorize_command(unassigned, {"node", "project-A", 1, "", false}));
