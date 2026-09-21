@@ -69,6 +69,11 @@ struct EpochCache {
   std::array<uint8_t, 32> project_digest{};
 };
 
+// Only canonical integer schema_version=2 is accepted in experimental v2
+// responses. cJSON.valueint truncates fractions (e.g. 2.5 -> 2), so the
+// transport parser must validate valuedouble as well.
+bool valid_v2_wire_schema(double value);
+
 bool allow_epoch_cache_update(const EpochCache &stored,
                               const EpochCache &candidate);
 
