@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "command_contract.cpp"
+        "assignment_v2.cpp"
         "config_store.cpp"
         "device_identity.cpp"
         "hub_discovery.cpp"
