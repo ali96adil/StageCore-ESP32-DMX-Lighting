@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 
 #include "esp_dmx.h"
 #include "esp_log.h"
@@ -122,6 +123,32 @@ esp_err_t lighting_output_init() {
   ESP_LOGI(kTag, "safe blackout initialized tx=%d rts=%d channels=%u",
            kDmxTxPin, kDmxRtsPin,
            static_cast<unsigned>(kChannelCount));
+  return ESP_OK;
+}
+
+// This reports the currently requested/sent software frame only. It is not
+// independent verification of the connected DMX decoder or LED voltage.
+esp_err_t lighting_output_read_slots(std::vector<uint8_t> *levels) {
+  if (levels == nullptr || !g_initialized.load() || g_frame_lock == nullptr ||
+      g_task == nullptr) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  if (xSemaphoreTake(g_frame_lock, pdMS_TO_TICKS(25)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  const uint32_t wanted = g_requested_generation.load();
+  const bool current = g_healthy.load() &&
+                       g_sent_generation.load() == wanted;
+  std::vector<uint8_t> snapshot;
+  if (current) {
+    snapshot.reserve(kChannelCount);
+    for (size_t i = 1; i <= kChannelCount; ++i) {
+      snapshot.push_back(g_frame[i]);
+    }
+  }
+  xSemaphoreGive(g_frame_lock);
+  if (!current) return ESP_ERR_INVALID_STATE;
+  *levels = std::move(snapshot);
   return ESP_OK;
 }
 
