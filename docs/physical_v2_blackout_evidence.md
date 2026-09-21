@@ -14,10 +14,11 @@ Snapshot, physical lights or the StageCore Pi. Related: StageCore #221, #239,
 2. Record actual installed Hub binary SHA, installed ESP build SHA/image,
    wiring and tester separately. A GitHub branch SHA is **not** proof of the
    firmware installed on the physical board.
-3. For the v2 log gate use only an independently approved and pinned
-   blackout-only test image; the current pinned v1 board does **not** satisfy
-   the experimental v2 signals. Never flash the draft just to satisfy this
-   evidence collector.
+3. The current pinned v1 board can provide a **v1 software baseline**
+   without flashing, labeled `V1_SOFTWARE_LOG_CAPTURED` when complete.
+   This is **not** v2 qualification. For the experimental v2 log gate, use
+   only an independently approved and pinned blackout-only test image.
+   Never flash a draft just to satisfy this collector.
 4. Keep the raw UART log locally. It might contain network/device identifiers;
    review it before sharing. The JSON includes identifiers and the raw log's
    SHA-256 but never claims physical electrical measurement.
@@ -42,6 +43,7 @@ UART for 30 seconds:
 ```bash
 python3 tools/collect_blackout_evidence.py \
   --port /dev/cu.usbserial-0001 --seconds 30 \
+  --raw-log-out "$HOME/stagecore-evidence/blackout-run-002.log" \
   --out "$HOME/stagecore-evidence/blackout-run-002.json"
 ```
 
@@ -51,14 +53,23 @@ longer capture within the 120-second limit or reuse a complete existing log.
 The script never flashes, sends a control command, touches Wi-Fi settings,
 writes NVS or attempts a DMX command. Do not use it during a live show.
 
+
+The serial capture requires `--raw-log-out` so the exact bytes hashed by
+the JSON remain available for reproducible re-analysis. Both the raw log and
+the JSON are created exclusively; choose new filenames per run. The script
+never overwrites prior evidence. A baseline collected from the currently
+installed v1 image must never be mislabeled as the experimental v2 probe or
+as a physical PASS.
+
 ## Meaning of the report
 
 The JSON stores the log SHA-256, device IDs, printed firmware version,
 software-log signals and reported DMX pins and universe size. These are
 **self-reported** observations and may be missing or misleading. An apparently
 complete v2 FAILSAFE log produces `software_log_status:
-SOFTWARE_LOG_CAPTURED`, **not physical PASS**. Missing evidence returns
-`INCOMPLETE`. A pin mismatch, identity mismatch or explicit local blackout
+SOFTWARE_LOG_CAPTURED`, **not physical PASS**. A complete pinned v1
+boot/provisioning baseline is labeled `V1_SOFTWARE_LOG_CAPTURED`; it **never
+claims v2 authority**. Missing evidence returns `INCOMPLETE`. A pin mismatch, identity mismatch or explicit local blackout
 failure returns `UNSAFE_LOG`. Both incomplete and unsafe results cause a
 nonzero process exit while preserving their JSON evidence.
 
