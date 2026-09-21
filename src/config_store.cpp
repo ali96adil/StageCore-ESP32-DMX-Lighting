@@ -5,6 +5,10 @@
 
 #include "nvs.h"
 
+#ifndef STAGECORE_EXPERIMENTAL_DEVICE_V2
+#define STAGECORE_EXPERIMENTAL_DEVICE_V2 0
+#endif
+
 namespace stagecore {
 namespace {
 
@@ -44,8 +48,15 @@ esp_err_t write_string(nvs_handle_t handle, const char *key, const std::string &
 }  // namespace
 
 bool DeviceConfig::complete() const {
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  // v2 pairs a persistent device identity with the Hub; it MUST NOT
+  // accept an NVS-stored Project ID as command/assignment authority.
+  return !wifi_ssid.empty() && wifi_password.size() >= 8 &&
+         !display_name.empty();
+#else
   return !wifi_ssid.empty() && wifi_password.size() >= 8 &&
          project_id.size() == 36 && !display_name.empty();
+#endif
 }
 
 esp_err_t load_device_config(DeviceConfig *config) {
@@ -79,7 +90,11 @@ esp_err_t save_device_config(const DeviceConfig &config) {
 
   err = write_string(handle, kSSIDKey, config.wifi_ssid);
   if (err == ESP_OK) err = write_string(handle, kPasswordKey, config.wifi_password);
+#if !STAGECORE_EXPERIMENTAL_DEVICE_V2
   if (err == ESP_OK) err = write_string(handle, kProjectKey, config.project_id);
+#endif
+  // In the experimental v2 image leave any legacy Project NVS key untouched
+  // for rollback, but never consult it for v2 authorization.
   if (err == ESP_OK) err = write_string(handle, kDisplayKey, config.display_name);
   if (err == ESP_OK) err = nvs_commit(handle);
   nvs_close(handle);
