@@ -1,5 +1,7 @@
 #include "assignment_epoch_store.h"
 
+#include "assignment_v2.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -90,17 +92,25 @@ esp_err_t confirm_zero_and_persist_epoch(
   bool found = false;
   esp_err_t err = load_blob(&existing, &found);
   if (err != ESP_OK) return err;
+  EpochCache stored{};
   if (found) {
-    const uint64_t highest = decode_epoch(existing);
-    if (highest == 0 || highest > kMaxEpoch || epoch < highest) {
-      return ESP_ERR_INVALID_STATE;  // never accept stale Hub epochs
-    }
-    if (epoch == highest) {
-      return std::memcmp(existing.data(), desired.data(), desired.size()) == 0
-                 ? ESP_OK  // exact reconnect, Project/state unchanged
-                 : ESP_ERR_INVALID_STATE;
-    }
+    stored.epoch = decode_epoch(existing);
+    stored.state = existing[1] == static_cast<uint8_t>(PersistedState::kBlocked)
+                       ? State::kBlocked : State::kUnassigned;
+    std::memcpy(stored.project_digest.data(),
+                existing.data() + kDigestOffset,
+                stored.project_digest.size());
   }
+  EpochCache candidate{};
+  candidate.epoch = epoch;
+  candidate.state = blocked ? State::kBlocked : State::kUnassigned;
+  std::memcpy(candidate.project_digest.data(),
+              desired.data() + kDigestOffset,
+              candidate.project_digest.size());
+  if (!allow_epoch_cache_update(stored, candidate)) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  if (found && stored.epoch == epoch) return ESP_OK; // exact reconnect
 
   nvs_handle_t handle;
   err = nvs_open(kNamespace, NVS_READWRITE, &handle);
