@@ -35,6 +35,8 @@ jobs:
             src/state_probe_v2.cpp tests/state_probe_v2_test.cpp \
             -o /tmp/stagecore-state-probe-v2-test
           /tmp/stagecore-state-probe-v2-test
+      - name: Test read-only UART evidence collector (host)
+        run: python -m unittest discover -s tests -p 'test_collect_blackout_evidence.py' -v
 
   firmware-build:
     name: Build ${{ matrix.image.name }}
