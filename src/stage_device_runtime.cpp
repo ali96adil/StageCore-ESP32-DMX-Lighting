@@ -14,6 +14,7 @@
 #include "lighting_contract.h"
 #include "lighting_configuration.h"
 #include "lighting_output.h"
+#include "runtime_capabilities.h"
 #include "state_probe_v2.h"
 #include "trusted_clock.h"
 #include "esp_event.h"
@@ -104,16 +105,9 @@ const char *reset_reason_name(esp_reset_reason_t reason) {
 cJSON *capabilities_json() {
   cJSON *array = cJSON_CreateArray();
   if (array == nullptr) return nullptr;
-  static constexpr const char *kCapabilities[] = {
-      "lighting.channels.set",
-      "lighting.channels.fade",
-      "lighting.blackout",
-      "lighting.identify",
-      "lighting.state.read",
-      "lighting.config.read",
-      "lighting.config.apply",
-  };
-  for (const char *capability : kCapabilities) {
+  for (const char *capability : runtime_advertised_capabilities(
+           STAGECORE_EXPERIMENTAL_DEVICE_V2 != 0,
+           STAGECORE_EXPERIMENTAL_V2_STATE_PROBE != 0)) {
     cJSON *item = cJSON_CreateString(capability);
     if (item == nullptr || !cJSON_AddItemToArray(array, item)) {
       if (item != nullptr) cJSON_Delete(item);
@@ -121,14 +115,6 @@ cJSON *capabilities_json() {
       return nullptr;
     }
   }
-#if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
-  cJSON *probe = cJSON_CreateString("lighting.state_probe/1");
-  if (probe == nullptr || !cJSON_AddItemToArray(array, probe)) {
-    if (probe != nullptr) cJSON_Delete(probe);
-    cJSON_Delete(array);
-    return nullptr;
-  }
-#endif
   return array;
 }
 
