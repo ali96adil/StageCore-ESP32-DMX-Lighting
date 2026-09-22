@@ -23,6 +23,11 @@ int main() {
   assert(v1 == expected_v1);
   // Probe flag alone must never alter the installed/default v1 image.
   assert(copy(false, true) == expected_v1);
+  // Only default v1 may expose retained legacy aliases/configuration hash.
+  // The v2 images preserve NVS for rollback but must not represent the old
+  // Project's configuration as a current v2 assignment/snapshot.
+  assert(stagecore::runtime_exposes_legacy_configuration(false));
+  assert(!stagecore::runtime_exposes_legacy_configuration(true));
 
   const auto v2_blackout = copy(true, false);
   assert(v2_blackout.empty()); // assignment/blackout frames are not show commands
