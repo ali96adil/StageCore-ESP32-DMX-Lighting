@@ -5,6 +5,31 @@ flashing procedure and does not activate v2 commands, the published Runtime
 Snapshot, physical lights or the StageCore Pi. Related: StageCore #221, #239,
 #255 and Firmware Draft #12/#13.
 
+## Advertised capabilities and v1 rollback boundary
+
+The authenticated `device.hello` capability list MUST describe what the
+selected image actually executes, not what an eventual v2 ACTIVE design might
+support. The default v1 image advertises its seven existing lighting
+operations. The experimental v2 blackout-only image advertises **no show
+commands**; assignment/blackout handshake frames are internal protocol
+messages rather than general lighting capabilities. Only the separate opt-in
+v2 probe image advertises `lighting.state_probe/1`, a read-only logical
+software report. No v2 image accepts `command.execute`, grants `READY`,
+restores a Cue or proves actual decoder/LED output.
+
+An existing v1 `project_id` NVS value is retained through v2 configuration
+for potential attended rollback. Its presence is not Hub-owned v2 assignment
+authority; returning to v1 after a v2 transfer may restore **old** v1
+project-scoped behavior. Do not downgrade/flash as a way to switch Projects.
+An operator must independently reconcile the legacy Project and published
+configuration, keep the physical output disconnected/blackout, and validate
+trust and snapshot before any reviewed rollback. A v2 image against an
+incompatible old Hub must fail closed, not silently turn into v1.
+
+`tests/runtime_capabilities_test.cpp` and the three image-build jobs in
+Firmware CI cover the source contract, **not** a live Hub/ESP handshake.
+Current installed v1 CH1 Identify observations are separate physical evidence.
+
 ## Before collecting
 
 1. **No live show.** Verify the intended device is not connected to a
