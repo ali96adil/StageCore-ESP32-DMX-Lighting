@@ -156,16 +156,24 @@ cJSON *observed_state_json(const RuntimeContext *context = nullptr) {
     cJSON_Delete(state);
     return nullptr;
   }
-  for (const auto &entry : lighting_current_levels()) {
-    cJSON_AddNumberToObject(levels, entry.channel_key.c_str(), entry.level);
+  // Legacy v1 channel aliases may still exist in NVS for rollback. A v2
+  // observation must not present those aliases as an active Project config.
+  const bool expose_legacy_config =
+      runtime_exposes_legacy_configuration(STAGECORE_EXPERIMENTAL_DEVICE_V2 != 0);
+  if (expose_legacy_config) {
+    for (const auto &entry : lighting_current_levels()) {
+      cJSON_AddNumberToObject(levels, entry.channel_key.c_str(), entry.level);
+    }
   }
   cJSON_AddItemToObject(state, "current_levels", levels);
   cJSON_AddBoolToObject(state, "dmx_healthy",
                         lighting_output_dmx_healthy());
-  const std::string configuration_hash = lighting_configuration_hash();
-  if (!configuration_hash.empty()) {
-    cJSON_AddStringToObject(state, "configuration_hash",
-                            configuration_hash.c_str());
+  if (expose_legacy_config) {
+    const std::string configuration_hash = lighting_configuration_hash();
+    if (!configuration_hash.empty()) {
+      cJSON_AddStringToObject(state, "configuration_hash",
+                              configuration_hash.c_str());
+    }
   }
   LightingActiveFade fade;
   if (lighting_active_fade(&fade) && trusted_clock_ready()) {
