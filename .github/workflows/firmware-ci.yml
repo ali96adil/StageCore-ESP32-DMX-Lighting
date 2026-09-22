@@ -29,6 +29,12 @@ jobs:
             src/assignment_v2.cpp tests/assignment_v2_test.cpp \
             -o /tmp/stagecore-assignment-v2-test
           /tmp/stagecore-assignment-v2-test
+      - name: Test advertised v1/v2 runtime capabilities (host)
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
+            tests/runtime_capabilities_test.cpp \
+            -o /tmp/stagecore-runtime-capabilities-test
+          /tmp/stagecore-runtime-capabilities-test
       - name: Test opt-in v2 read-only state probe (host)
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
