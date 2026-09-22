@@ -17,6 +17,17 @@ v2 probe image advertises `lighting.state_probe/1`, a read-only logical
 software report. No v2 image accepts `command.execute`, grants `READY`,
 restores a Cue or proves actual decoder/LED output.
 
+The experimental v2 firmware also retains any previously stored v1 lighting
+channel aliases and configuration bytes for a controlled rollback, but its
+`device.observation` deliberately reports an **empty** `current_levels`
+object and omits the legacy `configuration_hash`. That old hash belongs to
+the v1 Project and must never look like a Hub-owned current v2 snapshot.
+The separate opt-in `lighting.state_probe/1` reports actual local 12-slot
+software levels, explicitly not physical DMX/LED measurements or command
+authority. Default v1 observations retain their original aliases and hash.
+The shared pure capability/observation contract has a host regression, and
+all three images must pass exact-head CI.
+
 An existing v1 `project_id` NVS value is retained through v2 configuration
 for potential attended rollback. Its presence is not Hub-owned v2 assignment
 authority; returning to v1 after a v2 transfer may restore **old** v1
