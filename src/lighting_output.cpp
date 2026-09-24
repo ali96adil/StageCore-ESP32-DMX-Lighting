@@ -4,9 +4,12 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #include "esp_dmx.h"
 #include "esp_log.h"
+#include "hal/uart_ll.h"
+#include "soc/uart_struct.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -66,6 +69,7 @@ void dmx_task(void *) {
   TickType_t last_failure_log = 0;
   uint32_t consecutive_failures = 0;
   bool failure_reported = false;
+  const char *last_failure_stage = nullptr;
 
   // Diagnostics only: never alter the DMX frame, physical levels, timing,
   // failsafe, or g_healthy semantics when classifying a failed TX attempt.
@@ -73,9 +77,19 @@ void dmx_task(void *) {
                                   size_t sent, bool wait_done) {
     if (consecutive_failures != UINT32_MAX) ++consecutive_failures;
     const TickType_t now = xTaskGetTickCount();
-    if (!failure_reported ||
+    // Capture the UART registers only on the first failure, a stage change,
+    // or the existing 60-second diagnostic interval. No register writes or
+    // driver reinitialization; this diagnostic does not claim physical TX.
+    const bool stage_changed =
+        last_failure_stage == nullptr || std::strcmp(stage, last_failure_stage) != 0;
+    if (!failure_reported || stage_changed ||
         static_cast<TickType_t>(now - last_failure_log) >=
             kDiagnosticInterval) {
+      const uart_dev_t *const uart = UART_LL_GET_HW(kDmxPort);
+      const uint32_t int_raw = uart->int_raw.val;
+      const uint32_t int_st = uart->int_st.val;
+      const uint32_t int_ena = uart->int_ena.val;
+      const uint32_t status = uart->status.val;
       ESP_LOGW(kTag,
                "DMX TX unhealthy stage=%s written=%u sent=%u wait_done=%d "
                "expected=%u consecutive_failures=%lu",
@@ -83,8 +97,16 @@ void dmx_task(void *) {
                static_cast<unsigned>(sent), static_cast<int>(wait_done),
                static_cast<unsigned>(kFrameBytes),
                static_cast<unsigned long>(consecutive_failures));
+      ESP_LOGW(kTag,
+               "DMX UART1 snapshot stage=%s int_raw=0x%08lx "
+               "int_st=0x%08lx int_ena=0x%08lx status=0x%08lx",
+               stage, static_cast<unsigned long>(int_raw),
+               static_cast<unsigned long>(int_st),
+               static_cast<unsigned long>(int_ena),
+               static_cast<unsigned long>(status));
       last_failure_log = now;
     }
+    last_failure_stage = stage;
     failure_reported = true;
   };
 
@@ -117,6 +139,7 @@ void dmx_task(void *) {
                  static_cast<unsigned long>(consecutive_failures));
         consecutive_failures = 0;
         failure_reported = false;
+        last_failure_stage = nullptr;
       }
     } else {
       const char *stage = written != kFrameBytes
