@@ -61,6 +61,22 @@ extern "C" void app_main(void) {
     hold_safe_failure("DMX task startup failed");
   }
 
+#ifdef STAGECORE_RECOVERY_CLEAR_HUB_BINDING_ON_BOOT
+  ESP_LOGW(kTag,
+           "RECOVERY BUILD: clearing remembered Hub trust binding only");
+  if (stagecore::lighting_blackout(true) != ESP_OK) {
+    hold_safe_failure("recovery blackout failed");
+  }
+  if (stagecore::clear_hub_binding() != ESP_OK) {
+    hold_safe_failure("Hub trust binding reset failed");
+  }
+  ESP_LOGW(kTag,
+           "Hub trust binding cleared; Wi-Fi, project and device identity "
+           "preserved");
+  hold_safe_failure(
+      "Hub trust reset complete; flash the normal diagnostic firmware");
+#endif
+
   const esp_err_t lighting_config_err =
       stagecore::lighting_configuration_init();
   if (lighting_config_err != ESP_OK) {
