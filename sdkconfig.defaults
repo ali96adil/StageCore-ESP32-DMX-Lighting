@@ -6,7 +6,7 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # StageCore secure device gateway requires TLS 1.3.
 CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
-CONFIG_MBEDTLS_SSL_TLS1_3_KEXM_EPHEMERAL=y
+CONFIG_MBEDTLS_SSL_TLS1_3_KEX_EPHEMERAL=y
 CONFIG_MBEDTLS_SSL_TLS1_3_COMPATIBILITY_MODE=y
 CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
 
@@ -23,6 +23,12 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 # separately before the first real flash.
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
+# esp_dmx is consumed through PlatformIO lib_deps, so its component Kconfig
+# selections are not imported into the generated application sdkconfig.
+# Mirror the upstream CONFIG_DMX_ISR_IN_IRAM requirements explicitly so the
+# GPTimer ISR and the control functions called from that ISR remain IRAM-safe.
+CONFIG_GPTIMER_ISR_IRAM_SAFE=y
+CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM=y
 
 # Physical StageCore lighting nodes use 4 MiB ESP32-WROOM flash.
 # Keep ESP-IDF's generated flash-size choice aligned with the board target
