@@ -36,6 +36,8 @@ jobs:
           set -euo pipefail
           CONFIG=".pio/build/esp32dev/config/sdkconfig.h"
           test -f "$CONFIG"
-          grep -qx '#define CONFIG_GPTIMER_ISR_IRAM_SAFE 1' "$CONFIG"
+          grep -qx '#define CONFIG_GPTIMER_ISR_CACHE_SAFE 1' "$CONFIG"
+          grep -qx '#define CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM 1' "$CONFIG"
           grep -qx '#define CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM 1' "$CONFIG"
+          grep -qx '#define CONFIG_GPTIMER_OBJ_CACHE_SAFE 1' "$CONFIG"
           grep -q -- '-DCONFIG_DMX_ISR_IN_IRAM=1' platformio.ini
