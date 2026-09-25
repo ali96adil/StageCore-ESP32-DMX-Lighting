@@ -4,6 +4,7 @@ idf_component_register(
         "command_contract.cpp"
         "config_store.cpp"
         "device_identity.cpp"
+        "dmx_driver_diagnostics.c"
         "hub_discovery.cpp"
         "hub_security.cpp"
         "lighting_contract.cpp"
