@@ -41,6 +41,11 @@ esp_err_t write_string(nvs_handle_t handle, const char *key, const std::string &
   return nvs_set_str(handle, key, value.c_str());
 }
 
+esp_err_t erase_key_if_present(nvs_handle_t handle, const char *key) {
+  const esp_err_t err = nvs_erase_key(handle, key);
+  return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+}
+
 }  // namespace
 
 bool DeviceConfig::complete() const {
@@ -121,6 +126,20 @@ esp_err_t save_hub_binding(const HubBinding &binding) {
   err = write_string(handle, kHubIDKey, binding.hub_id);
   if (err == ESP_OK) err = write_string(handle, kHubFingerprintKey, binding.fingerprint);
   if (err == ESP_OK) err = write_string(handle, kHubTLSKey, binding.tls_sha256);
+  if (err == ESP_OK) err = nvs_commit(handle);
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t clear_hub_binding() {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+  if (err != ESP_OK) return err;
+
+  err = erase_key_if_present(handle, kHubIDKey);
+  if (err == ESP_OK) err = erase_key_if_present(handle, kHubFingerprintKey);
+  if (err == ESP_OK) err = erase_key_if_present(handle, kHubTLSKey);
   if (err == ESP_OK) err = nvs_commit(handle);
   nvs_close(handle);
   return err;
