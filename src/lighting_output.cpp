@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "esp_dmx.h"
+#include "dmx_driver_diagnostics.h"
 #include "esp_log.h"
 #include "hal/uart_ll.h"
 #include "soc/uart_struct.h"
@@ -90,6 +91,10 @@ void dmx_task(void *) {
       const uint32_t int_st = uart->int_st.val;
       const uint32_t int_ena = uart->int_ena.val;
       const uint32_t status = uart->status.val;
+      stagecore_dmx_driver_snapshot_t driver_snapshot{};
+      const bool have_driver_snapshot =
+          stagecore_dmx_capture_driver_snapshot(
+              static_cast<int>(kDmxPort), &driver_snapshot);
       ESP_LOGW(kTag,
                "DMX TX unhealthy stage=%s written=%u sent=%u wait_done=%d "
                "expected=%u consecutive_failures=%lu",
@@ -104,6 +109,21 @@ void dmx_task(void *) {
                static_cast<unsigned long>(int_st),
                static_cast<unsigned long>(int_ena),
                static_cast<unsigned long>(status));
+      if (have_driver_snapshot) {
+        ESP_LOGW(
+            kTag,
+            "DMX driver snapshot stage=%s enabled=%d controller=%d "
+            "status=%d progress=%d head=%d size=%d task_waiting=0x%08lx "
+            "eop_us=%lld",
+            stage, static_cast<int>(driver_snapshot.enabled),
+            static_cast<int>(driver_snapshot.is_controller),
+            driver_snapshot.status, driver_snapshot.progress,
+            driver_snapshot.head, driver_snapshot.size,
+            static_cast<unsigned long>(driver_snapshot.task_waiting),
+            static_cast<long long>(driver_snapshot.controller_eop_timestamp));
+      } else {
+        ESP_LOGW(kTag, "DMX driver snapshot stage=%s unavailable", stage);
+      }
       last_failure_log = now;
     }
     last_failure_stage = stage;
