@@ -14,6 +14,10 @@
 #include "provisioning.h"
 #include "stage_device_runtime.h"
 
+#ifndef STAGECORE_EXPERIMENTAL_DEVICE_V2
+#define STAGECORE_EXPERIMENTAL_DEVICE_V2 0
+#endif
+
 #ifndef STAGECORE_FW_VERSION
 #define STAGECORE_FW_VERSION "0.2.0-dev"
 #endif
@@ -80,6 +84,11 @@ extern "C" void app_main(void) {
   if (stagecore::load_device_config(&config) != ESP_OK) {
     hold_safe_failure("configuration storage unavailable");
   }
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  // Never reuse a legacy NVS Project as Hub-owned v2 assignment authority.
+  // The old persisted value remains intact for a possible v1 rollback.
+  config.project_id.clear();
+#endif
 
   const std::string fallback_name = default_display_name(identity.device_id());
   if (!config.complete()) {
@@ -94,8 +103,13 @@ extern "C" void app_main(void) {
                                            : config.display_name);
   }
 
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  ESP_LOGW(kTag, "EXPERIMENTAL v2: projectless, blackout-only image; device=%s",
+           identity.device_id().c_str());
+#else
   ESP_LOGI(kTag, "provisioned for project %s as %s",
            config.project_id.c_str(), config.display_name.c_str());
+#endif
 
   while (true) {
     stagecore::VerifiedHub hub;

@@ -9,32 +9,73 @@ on:
 permissions:
   contents: read
 
+# One firmware batch = one head, superseded runs for this PR are canceled.
+# Independent host/v1/v2/probe jobs avoid sequentially rebuilding three images.
+concurrency:
+  group: firmware-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  host-contract:
+    name: Host assignment and software-probe contract
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Test dormant v2 assignment contract (host)
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
+            src/assignment_v2.cpp tests/assignment_v2_test.cpp \
+            -o /tmp/stagecore-assignment-v2-test
+          /tmp/stagecore-assignment-v2-test
+      - name: Test advertised v1/v2 runtime capabilities (host)
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
+            tests/runtime_capabilities_test.cpp \
+            -o /tmp/stagecore-runtime-capabilities-test
+          /tmp/stagecore-runtime-capabilities-test
+      - name: Test opt-in v2 read-only state probe (host)
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
+            src/state_probe_v2.cpp tests/state_probe_v2_test.cpp \
+            -o /tmp/stagecore-state-probe-v2-test
+          /tmp/stagecore-state-probe-v2-test
+      - name: Test read-only UART evidence collector (host)
+        run: python -m unittest discover -s tests -p 'test_collect_blackout_evidence.py' -v
+
+  firmware-build:
+    name: Build ${{ matrix.image.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: v1-default
+            env: esp32dev
+          - name: v2-blackout-only
+            env: esp32dev-v2-experimental
+          - name: v2-read-only-probe
+            env: esp32dev-v2-probe-experimental
     env:
       PLATFORMIO_DISABLE_UPGRADE_CHECK: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install PlatformIO
         run: python -m pip install --disable-pip-version-check platformio==6.2.0
-
-      - name: Build ESP32-WROOM firmware
-        run: pio run -e esp32dev
-
+      - name: Build firmware image (do not flash)
+        run: pio run -e ${{ matrix.image.env }}
       - name: Verify DMX/GPTimer IRAM safety contract
         shell: bash
         run: |
           set -euo pipefail
-          CONFIG=".pio/build/esp32dev/config/sdkconfig.h"
+          CONFIG=".pio/build/${{ matrix.image.env }}/config/sdkconfig.h"
           test -f "$CONFIG"
           grep -qx '#define CONFIG_GPTIMER_ISR_CACHE_SAFE 1' "$CONFIG"
           grep -qx '#define CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM 1' "$CONFIG"
