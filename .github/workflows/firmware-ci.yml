@@ -58,6 +58,8 @@ jobs:
             env: esp32dev-v2-experimental
           - name: v2-read-only-probe
             env: esp32dev-v2-probe-experimental
+          - name: v2-active-source-only
+            env: esp32dev-v2-active-experimental
     env:
       PLATFORMIO_DISABLE_UPGRADE_CHECK: "1"
     steps:
