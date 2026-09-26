@@ -39,6 +39,10 @@
 #define STAGECORE_EXPERIMENTAL_V2_STATE_PROBE 0
 #endif
 
+#ifndef STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+#define STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE 0
+#endif
+
 namespace stagecore {
 namespace {
 
@@ -49,6 +53,10 @@ constexpr EventBits_t kBlackoutBit = BIT5;
 constexpr EventBits_t kEpochReceiptBit = BIT6;
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
 constexpr EventBits_t kProbeBit = BIT7;
+#endif
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+constexpr EventBits_t kLightingActivationBit = BIT8;
+constexpr EventBits_t kActiveReadyBit = BIT9;
 #endif
 constexpr int kPhysicalDMXChannels = 12;
 #else
@@ -75,6 +83,13 @@ struct RuntimeContext {
   std::string pending_blackout_frame;
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
   std::string pending_probe_frame;
+#endif
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  std::string pending_activation_frame;
+  std::string runtime_snapshot_id;
+  std::string configuration_hash;
+  bool active_epoch = false;
+  bool commands_enabled = false;
 #endif
   std::atomic<int64_t> assignment_epoch{0};
   int64_t connection_generation = 0;
@@ -107,7 +122,8 @@ cJSON *capabilities_json() {
   if (array == nullptr) return nullptr;
   for (const char *capability : runtime_advertised_capabilities(
            STAGECORE_EXPERIMENTAL_DEVICE_V2 != 0,
-           STAGECORE_EXPERIMENTAL_V2_STATE_PROBE != 0)) {
+           STAGECORE_EXPERIMENTAL_V2_STATE_PROBE != 0,
+           STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE != 0)) {
     cJSON *item = cJSON_CreateString(capability);
     if (item == nullptr || !cJSON_AddItemToArray(array, item)) {
       if (item != nullptr) cJSON_Delete(item);
