@@ -64,7 +64,9 @@ esp_err_t evaluate_command_execute_frame(
     const std::string &expected_device_id,
     const std::string &expected_project_id,
     CommandDedupeCache *dedupe,
-    CommandDecision *decision);
+    CommandDecision *decision,
+    int expected_outer_schema = 1,
+    std::string expected_runtime_snapshot_id = {});
 
 std::string make_command_result(
     const std::string &device_id,

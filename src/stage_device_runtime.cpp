@@ -39,6 +39,10 @@
 #define STAGECORE_EXPERIMENTAL_V2_STATE_PROBE 0
 #endif
 
+#ifndef STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+#define STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE 0
+#endif
+
 namespace stagecore {
 namespace {
 
@@ -49,6 +53,10 @@ constexpr EventBits_t kBlackoutBit = BIT5;
 constexpr EventBits_t kEpochReceiptBit = BIT6;
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
 constexpr EventBits_t kProbeBit = BIT7;
+#endif
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+constexpr EventBits_t kLightingActivationBit = BIT8;
+constexpr EventBits_t kActiveReadyBit = BIT9;
 #endif
 constexpr int kPhysicalDMXChannels = 12;
 #else
@@ -75,6 +83,13 @@ struct RuntimeContext {
   std::string pending_blackout_frame;
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
   std::string pending_probe_frame;
+#endif
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  std::string pending_activation_frame;
+  std::string runtime_snapshot_id;
+  std::string configuration_hash;
+  bool active_epoch = false;
+  bool commands_enabled = false;
 #endif
   std::atomic<int64_t> assignment_epoch{0};
   int64_t connection_generation = 0;
@@ -107,7 +122,8 @@ cJSON *capabilities_json() {
   if (array == nullptr) return nullptr;
   for (const char *capability : runtime_advertised_capabilities(
            STAGECORE_EXPERIMENTAL_DEVICE_V2 != 0,
-           STAGECORE_EXPERIMENTAL_V2_STATE_PROBE != 0)) {
+           STAGECORE_EXPERIMENTAL_V2_STATE_PROBE != 0,
+           STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE != 0)) {
     cJSON *item = cJSON_CreateString(capability);
     if (item == nullptr || !cJSON_AddItemToArray(array, item)) {
       if (item != nullptr) cJSON_Delete(item);
@@ -118,11 +134,26 @@ cJSON *capabilities_json() {
   return array;
 }
 
-const char *runtime_readiness() {
+const char *runtime_readiness(const RuntimeContext *context = nullptr) {
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-  // Assignment does not yet activate a Project snapshot or project commands.
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  if (context == nullptr || !context->commands_enabled ||
+      !lighting_configuration_ready() ||
+      !lighting_output_dmx_healthy() ||
+      lighting_authority() == "FAILSAFE") {
+    return "BLOCKER";
+  }
+  if (esp_reset_reason() == ESP_RST_BROWNOUT) {
+    return "WARNING";
+  }
+  return "READY";
+#else
+  // Blackout/probe v2 images never claim show readiness.
+  (void)context;
   return "BLOCKER";
 #endif
+#else
+  (void)context;
   if (!lighting_configuration_ready() ||
       !lighting_output_dmx_healthy() ||
       lighting_authority() == "FAILSAFE") {
@@ -132,6 +163,7 @@ const char *runtime_readiness() {
     return "WARNING";
   }
   return "READY";
+#endif
 }
 
 cJSON *observed_state_json(const RuntimeContext *context = nullptr) {
@@ -158,9 +190,13 @@ cJSON *observed_state_json(const RuntimeContext *context = nullptr) {
   }
   // Legacy v1 channel aliases may still exist in NVS for rollback. A v2
   // observation must not present those aliases as an active Project config.
-  const bool expose_legacy_config =
+  bool expose_runtime_config =
       runtime_exposes_legacy_configuration(STAGECORE_EXPERIMENTAL_DEVICE_V2 != 0);
-  if (expose_legacy_config) {
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  expose_runtime_config =
+      expose_runtime_config || (context != nullptr && context->commands_enabled);
+#endif
+  if (expose_runtime_config) {
     for (const auto &entry : lighting_current_levels()) {
       cJSON_AddNumberToObject(levels, entry.channel_key.c_str(), entry.level);
     }
@@ -168,7 +204,7 @@ cJSON *observed_state_json(const RuntimeContext *context = nullptr) {
   cJSON_AddItemToObject(state, "current_levels", levels);
   cJSON_AddBoolToObject(state, "dmx_healthy",
                         lighting_output_dmx_healthy());
-  if (expose_legacy_config) {
+  if (expose_runtime_config) {
     const std::string configuration_hash = lighting_configuration_hash();
     if (!configuration_hash.empty()) {
       cJSON_AddStringToObject(state, "configuration_hash",
@@ -295,7 +331,7 @@ std::string make_observation(const VerifiedHub &hub,
   cJSON_AddNumberToObject(root, "schema_version", 1);
 #endif
   cJSON_AddStringToObject(root, "device_id", identity.device_id().c_str());
-  cJSON_AddStringToObject(root, "readiness", runtime_readiness());
+  cJSON_AddStringToObject(root, "readiness", runtime_readiness(context));
 
   cJSON *observed = observed_state_json(context);
   cJSON *network = network_state_json(hub);
@@ -366,20 +402,53 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
         std::strcmp(state->valuestring, "UNASSIGNED") == 0;
     const bool blocked = cJSON_IsString(state) && state->valuestring &&
         std::strcmp(state->valuestring, "BLOCKED") == 0;
+    bool active = false;
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+    const cJSON *snapshot =
+        cJSON_GetObjectItemCaseSensitive(root, "runtime_snapshot_id");
+    const cJSON *configuration_hash =
+        cJSON_GetObjectItemCaseSensitive(root, "configuration_hash");
+    const cJSON *scope_ack_required =
+        cJSON_GetObjectItemCaseSensitive(root, "scope_ack_required");
+    active = cJSON_IsString(state) && state->valuestring &&
+        std::strcmp(state->valuestring, "ACTIVE") == 0;
+#endif
     const bool project_unassigned = project == nullptr ||
-        (cJSON_IsString(project) && project->valuestring && project->valuestring[0] == '\0');
-    const bool project_blocked = cJSON_IsString(project) && project->valuestring &&
-        project->valuestring[0] != '\0';
+        (cJSON_IsString(project) && project->valuestring &&
+         project->valuestring[0] == '\0');
+    const bool project_assigned = cJSON_IsString(project) &&
+        project->valuestring && project->valuestring[0] != '\0';
+    const bool base_shape =
+        unassigned && project_unassigned && ack_required == nullptr;
+    const bool blocked_shape =
+        blocked && project_assigned && cJSON_IsTrue(ack_required);
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+    const bool active_shape =
+        active && project_assigned &&
+        cJSON_IsString(snapshot) && snapshot->valuestring &&
+        snapshot->valuestring[0] != '\0' &&
+        canonical_hex_nonce(configuration_hash) &&
+        cJSON_IsTrue(scope_ack_required) && ack_required == nullptr;
+#else
+    const bool active_shape = false;
+#endif
     ok = positive_wire_integer(root, "assignment_epoch", &epoch) &&
          positive_wire_integer(root, "connection_generation", &generation) &&
-         ((unassigned && project_unassigned && ack_required == nullptr) ||
-          (blocked && project_blocked && epoch > 1 && cJSON_IsTrue(ack_required))) &&
+         (base_shape || ((blocked_shape || active_shape) && epoch > 1)) &&
          cJSON_IsTrue(blackout) && cJSON_IsFalse(commands) &&
          context->assignment_epoch.load() == 0;
     if (ok) {
-      context->project_id = blocked ? project->valuestring : "";
+      context->project_id = (blocked || active) ? project->valuestring : "";
       context->connection_generation = generation;
       context->blocked_epoch = blocked;
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+      context->active_epoch = active;
+      context->commands_enabled = false;
+      if (active) {
+        context->runtime_snapshot_id = snapshot->valuestring;
+        context->configuration_hash = configuration_hash->valuestring;
+      }
+#endif
       context->assignment_epoch.store(epoch);
       xEventGroupSetBits(context->events, kReadyBit);
     }
@@ -406,6 +475,9 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
           || !context->pending_probe_frame.empty()
 #endif
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+          || !context->pending_activation_frame.empty()
+#endif
           ) {
         ok = false;
       } else {
@@ -416,6 +488,63 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     } else {
       ok = false;
     }
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  } else if (ok && std::strcmp(type->valuestring, "lighting.assignment.activate") == 0) {
+    int64_t epoch = 0;
+    int64_t generation = 0;
+    int64_t channels = 0;
+    const cJSON *activation =
+        cJSON_GetObjectItemCaseSensitive(root, "activation_id");
+    const cJSON *project =
+        cJSON_GetObjectItemCaseSensitive(root, "project_id");
+    const cJSON *snapshot =
+        cJSON_GetObjectItemCaseSensitive(root, "runtime_snapshot_id");
+    const cJSON *nonce =
+        cJSON_GetObjectItemCaseSensitive(root, "challenge");
+    const cJSON *configuration =
+        cJSON_GetObjectItemCaseSensitive(root, "configuration");
+    const cJSON *configuration_hash =
+        cJSON_GetObjectItemCaseSensitive(root, "configuration_hash");
+    const cJSON *required =
+        cJSON_GetObjectItemCaseSensitive(root, "blackout_required");
+    const cJSON *commands =
+        cJSON_GetObjectItemCaseSensitive(root, "commands_enabled");
+    ok = context->blocked_epoch && !context->active_epoch &&
+         context->assignment_epoch.load() > 1 &&
+         positive_wire_integer(root, "assignment_epoch", &epoch) &&
+         epoch == context->assignment_epoch.load() &&
+         positive_wire_integer(root, "connection_generation", &generation) &&
+         generation == context->connection_generation &&
+         positive_wire_integer(root, "expected_channels", &channels) &&
+         channels == kPhysicalDMXChannels &&
+         cJSON_IsString(activation) && activation->valuestring &&
+         std::strlen(activation->valuestring) == 36 &&
+         cJSON_IsString(project) && project->valuestring &&
+         context->project_id == project->valuestring &&
+         cJSON_IsString(snapshot) && snapshot->valuestring &&
+         snapshot->valuestring[0] != '\0' &&
+         canonical_hex_nonce(nonce) &&
+         canonical_hex_nonce(configuration_hash) &&
+         cJSON_IsObject(configuration) &&
+         cJSON_IsTrue(required) && cJSON_IsFalse(commands);
+    if (ok && context->command_lock != nullptr &&
+        xSemaphoreTake(context->command_lock, 0) == pdTRUE) {
+      if (!context->pending_blackout_frame.empty() ||
+          !context->pending_activation_frame.empty()
+#if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+          || !context->pending_probe_frame.empty()
+#endif
+          || !context->pending_command_frame.empty()) {
+        ok = false;
+      } else {
+        context->pending_activation_frame = text;
+        xEventGroupSetBits(context->events, kLightingActivationBit);
+      }
+      xSemaphoreGive(context->command_lock);
+    } else {
+      ok = false;
+    }
+#endif
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
   } else if (ok && std::strcmp(type->valuestring, "lighting.state_probe") == 0) {
     int64_t epoch = 0;
@@ -438,7 +567,11 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     if (ok && context->command_lock != nullptr &&
         xSemaphoreTake(context->command_lock, 0) == pdTRUE) {
       if (!context->pending_blackout_frame.empty() ||
-          !context->pending_probe_frame.empty()) {
+          !context->pending_probe_frame.empty()
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+          || !context->pending_activation_frame.empty()
+#endif
+          ) {
         ok = false;
       } else {
         context->pending_probe_frame = text;
@@ -467,9 +600,58 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
          generation == context->connection_generation &&
          cJSON_IsTrue(persisted) && cJSON_IsFalse(commands);
     if (ok) xEventGroupSetBits(context->events, kEpochReceiptBit);
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  } else if (ok && std::strcmp(type->valuestring, "runtime.ready") == 0) {
+    const cJSON *protocol =
+        cJSON_GetObjectItemCaseSensitive(root, "protocol_version");
+    const cJSON *project =
+        cJSON_GetObjectItemCaseSensitive(root, "project_id");
+    const cJSON *snapshot =
+        cJSON_GetObjectItemCaseSensitive(root, "runtime_snapshot_id");
+    const cJSON *configuration_hash =
+        cJSON_GetObjectItemCaseSensitive(root, "configuration_hash");
+    const cJSON *commands =
+        cJSON_GetObjectItemCaseSensitive(root, "commands_enabled");
+    int64_t epoch = 0;
+    int64_t generation = 0;
+    ok = context->active_epoch && !context->commands_enabled &&
+         cJSON_IsString(protocol) && protocol->valuestring &&
+         std::strcmp(protocol->valuestring, kProtocolVersion) == 0 &&
+         cJSON_IsString(project) && project->valuestring &&
+         context->project_id == project->valuestring &&
+         cJSON_IsString(snapshot) && snapshot->valuestring &&
+         context->runtime_snapshot_id == snapshot->valuestring &&
+         canonical_hex_nonce(configuration_hash) &&
+         context->configuration_hash == configuration_hash->valuestring &&
+         positive_wire_integer(root, "assignment_epoch", &epoch) &&
+         epoch == context->assignment_epoch.load() &&
+         positive_wire_integer(root, "connection_generation", &generation) &&
+         generation == context->connection_generation &&
+         cJSON_IsTrue(commands);
+    if (ok) {
+      context->commands_enabled = true;
+      xEventGroupSetBits(context->events, kActiveReadyBit);
+    }
+  } else if (ok && std::strcmp(type->valuestring, "command.execute") == 0) {
+    ok = context->active_epoch && context->commands_enabled &&
+         context->command_lock != nullptr &&
+         xSemaphoreTake(context->command_lock, 0) == pdTRUE;
+    if (ok) {
+      if (!context->pending_command_frame.empty() ||
+          !context->pending_activation_frame.empty() ||
+          !context->pending_blackout_frame.empty()) {
+        ok = false;
+      } else {
+        context->pending_command_frame = text;
+        xEventGroupSetBits(context->events, kCommandBit);
+      }
+      xSemaphoreGive(context->command_lock);
+    }
+#endif
   } else {
-    // Never accept command.execute, runtime.ready, project activation or
-    // unsupported messages in the blackout-only experimental image.
+    // Blackout-only v2 images never accept show commands or ACTIVE state.
+    // The active source-only image reaches command.execute only after the
+    // exact Hub-owned Project/Snapshot/config scope handshake above.
     ok = false;
   }
 #else
@@ -650,6 +832,161 @@ esp_err_t process_pending_blackout(RuntimeContext *context,
 }
 #endif
 
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+esp_err_t process_pending_activation(RuntimeContext *context,
+                                     esp_websocket_client_handle_t client) {
+  if (context == nullptr || context->command_lock == nullptr || client == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  std::string frame;
+  if (xSemaphoreTake(context->command_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  frame.swap(context->pending_activation_frame);
+  xSemaphoreGive(context->command_lock);
+  xEventGroupClearBits(context->events, kLightingActivationBit);
+  if (frame.empty()) return ESP_ERR_INVALID_STATE;
+
+  cJSON *root = cJSON_ParseWithLength(frame.data(), frame.size());
+  if (root == nullptr) return ESP_ERR_INVALID_RESPONSE;
+  const cJSON *activation =
+      cJSON_GetObjectItemCaseSensitive(root, "activation_id");
+  const cJSON *project =
+      cJSON_GetObjectItemCaseSensitive(root, "project_id");
+  const cJSON *snapshot =
+      cJSON_GetObjectItemCaseSensitive(root, "runtime_snapshot_id");
+  const cJSON *nonce =
+      cJSON_GetObjectItemCaseSensitive(root, "challenge");
+  const cJSON *configuration =
+      cJSON_GetObjectItemCaseSensitive(root, "configuration");
+  const cJSON *configuration_hash =
+      cJSON_GetObjectItemCaseSensitive(root, "configuration_hash");
+  int64_t epoch = 0;
+  int64_t generation = 0;
+  int64_t channels = 0;
+  const bool scope_ok =
+      context->blocked_epoch && !context->active_epoch &&
+      positive_wire_integer(root, "assignment_epoch", &epoch) &&
+      epoch == context->assignment_epoch.load() &&
+      positive_wire_integer(root, "connection_generation", &generation) &&
+      generation == context->connection_generation &&
+      positive_wire_integer(root, "expected_channels", &channels) &&
+      channels == kPhysicalDMXChannels &&
+      cJSON_IsString(activation) && activation->valuestring &&
+      std::strlen(activation->valuestring) == 36 &&
+      cJSON_IsString(project) && project->valuestring &&
+      context->project_id == project->valuestring &&
+      cJSON_IsString(snapshot) && snapshot->valuestring &&
+      snapshot->valuestring[0] != '\0' &&
+      canonical_hex_nonce(nonce) &&
+      canonical_hex_nonce(configuration_hash) &&
+      cJSON_IsObject(configuration);
+  if (!scope_ok) {
+    cJSON_Delete(root);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  cJSON *payload_root = cJSON_CreateObject();
+  cJSON *configuration_copy = cJSON_Duplicate(configuration, true);
+  if (payload_root == nullptr || configuration_copy == nullptr ||
+      !cJSON_AddItemToObject(payload_root, "configuration",
+                             configuration_copy)) {
+    if (configuration_copy != nullptr &&
+        (payload_root == nullptr ||
+         cJSON_GetObjectItemCaseSensitive(payload_root, "configuration") == nullptr)) {
+      cJSON_Delete(configuration_copy);
+    }
+    if (payload_root != nullptr) cJSON_Delete(payload_root);
+    cJSON_Delete(root);
+    return ESP_ERR_NO_MEM;
+  }
+  const std::string payload_json = print_json(payload_root);
+  cJSON_Delete(payload_root);
+  if (payload_json.empty()) {
+    cJSON_Delete(root);
+    return ESP_ERR_NO_MEM;
+  }
+
+  CommandEnvelopeV1 config_command;
+  config_command.command_type = "LIGHTING_CONFIG_APPLY";
+  config_command.payload_json = payload_json;
+  LightingPayloadV1 payload;
+  std::string payload_error;
+  esp_err_t err =
+      validate_lighting_payload(config_command, &payload, &payload_error);
+  if (err != ESP_OK) {
+    cJSON_Delete(root);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  // Stay fail-closed before, during and after persistence of the new Project
+  // configuration. CONFIG_APPLY may update NVS, but it never grants command
+  // authority; the Hub must still commit ACTIVE and force a fresh reconnect.
+  err = lighting_blackout(true);
+  if (err == ESP_OK) err = lighting_output_blackout_immediate();
+  if (err != ESP_OK || !lighting_output_dmx_healthy()) {
+    cJSON_Delete(root);
+    return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
+  }
+
+  std::string applied_hash;
+  err = lighting_configuration_apply(payload.configuration, &applied_hash);
+  if (err != ESP_OK ||
+      applied_hash != std::string(configuration_hash->valuestring)) {
+    (void)lighting_blackout(true);
+    (void)lighting_output_blackout_immediate();
+    cJSON_Delete(root);
+    return err != ESP_OK ? err : ESP_ERR_INVALID_CRC;
+  }
+
+  err = lighting_blackout(true);
+  if (err == ESP_OK) err = lighting_output_blackout_immediate();
+  std::vector<uint8_t> slots;
+  if (err == ESP_OK) err = lighting_output_read_slots(&slots);
+  if (err != ESP_OK || !lighting_output_dmx_healthy() ||
+      slots.size() != kPhysicalDMXChannels) {
+    cJSON_Delete(root);
+    return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
+  }
+  for (uint8_t level : slots) {
+    if (level != 0) {
+      cJSON_Delete(root);
+      return ESP_ERR_INVALID_STATE;
+    }
+  }
+
+  cJSON *ack = cJSON_CreateObject();
+  cJSON *levels = cJSON_CreateArray();
+  if (ack == nullptr || levels == nullptr) {
+    if (ack != nullptr) cJSON_Delete(ack);
+    if (levels != nullptr) cJSON_Delete(levels);
+    cJSON_Delete(root);
+    return ESP_ERR_NO_MEM;
+  }
+  cJSON_AddStringToObject(ack, "type", "lighting.assignment.activate_ack");
+  cJSON_AddNumberToObject(ack, "schema_version", 2);
+  cJSON_AddStringToObject(ack, "device_id", context->device_id.c_str());
+  cJSON_AddStringToObject(ack, "activation_id", activation->valuestring);
+  cJSON_AddStringToObject(ack, "project_id", project->valuestring);
+  cJSON_AddStringToObject(ack, "runtime_snapshot_id", snapshot->valuestring);
+  cJSON_AddNumberToObject(ack, "assignment_epoch",
+                          static_cast<double>(epoch));
+  cJSON_AddNumberToObject(ack, "connection_generation",
+                          static_cast<double>(generation));
+  cJSON_AddStringToObject(ack, "challenge", nonce->valuestring);
+  cJSON_AddStringToObject(ack, "configuration_hash", applied_hash.c_str());
+  cJSON_AddBoolToObject(ack, "blackout", true);
+  for (uint8_t level : slots) {
+    cJSON_AddItemToArray(levels, cJSON_CreateNumber(level));
+  }
+  cJSON_AddItemToObject(ack, "channel_levels", levels);
+  const std::string response = print_json(ack);
+  cJSON_Delete(ack);
+  cJSON_Delete(root);
+  return send_text(client, response);
+}
+#endif
+
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
 esp_err_t process_pending_probe(RuntimeContext *context,
                                 esp_websocket_client_handle_t client) {
@@ -748,6 +1085,45 @@ std::string make_blocked_epoch_ack(const RuntimeContext &context) {
                           static_cast<double>(context.assignment_epoch.load()));
   cJSON_AddNumberToObject(root, "connection_generation",
                           static_cast<double>(context.connection_generation));
+  cJSON_AddBoolToObject(root, "blackout", true);
+  for (int i = 0; i < kPhysicalDMXChannels; ++i) {
+    cJSON_AddItemToArray(levels, cJSON_CreateNumber(0));
+  }
+  cJSON_AddItemToObject(root, "channel_levels", levels);
+  const std::string result = print_json(root);
+  cJSON_Delete(root);
+  return result;
+}
+#endif
+
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+std::string make_active_scope_ack(const RuntimeContext &context) {
+  if (!context.active_epoch || context.commands_enabled ||
+      context.project_id.empty() || context.runtime_snapshot_id.empty() ||
+      context.configuration_hash.size() != 64 ||
+      context.assignment_epoch.load() <= 1 ||
+      context.connection_generation <= 0) {
+    return {};
+  }
+  cJSON *root = cJSON_CreateObject();
+  cJSON *levels = cJSON_CreateArray();
+  if (root == nullptr || levels == nullptr) {
+    if (root != nullptr) cJSON_Delete(root);
+    if (levels != nullptr) cJSON_Delete(levels);
+    return {};
+  }
+  cJSON_AddStringToObject(root, "type", "lighting.assignment.scope_ack");
+  cJSON_AddNumberToObject(root, "schema_version", 2);
+  cJSON_AddStringToObject(root, "device_id", context.device_id.c_str());
+  cJSON_AddStringToObject(root, "project_id", context.project_id.c_str());
+  cJSON_AddStringToObject(root, "runtime_snapshot_id",
+                          context.runtime_snapshot_id.c_str());
+  cJSON_AddNumberToObject(root, "assignment_epoch",
+                          static_cast<double>(context.assignment_epoch.load()));
+  cJSON_AddNumberToObject(root, "connection_generation",
+                          static_cast<double>(context.connection_generation));
+  cJSON_AddStringToObject(root, "configuration_hash",
+                          context.configuration_hash.c_str());
   cJSON_AddBoolToObject(root, "blackout", true);
   for (int i = 0; i < kPhysicalDMXChannels; ++i) {
     cJSON_AddItemToArray(levels, cJSON_CreateNumber(0));
@@ -885,9 +1261,15 @@ esp_err_t process_pending_command(RuntimeContext *context,
   if (frame.empty()) return ESP_OK;
 
   CommandDecision decision;
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  esp_err_t err = evaluate_command_execute_frame(
+      frame, context->device_id, context->project_id,
+      &context->dedupe, &decision, 2, context->runtime_snapshot_id);
+#else
   esp_err_t err = evaluate_command_execute_frame(
       frame, context->device_id, context->project_id,
       &context->dedupe, &decision);
+#endif
   if (err != ESP_OK) {
     ESP_LOGE(kTag, "malformed command.execute frame; closing runtime");
     return err;
@@ -1273,40 +1655,85 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
   }
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-  ESP_LOGW(kTag, "v2 Hub assignment received; project commands disabled");
-  // Neither a Hub assignment nor this software-zero report activates DMX
-  // channels. Always cancel fades/events and write all 12 physical slots to
-  // zero before persisting the Hub epoch or acknowledging it.
+  ESP_LOGW(kTag, "v2 Hub assignment received; output starts in FAILSAFE blackout");
+  // Every v2 connection begins with a software-confirmed all-slot blackout.
+  // ACTIVE reconnect is Hub-owned and does not persist ACTIVE authority locally.
   err = lighting_blackout(true);
   if (err == ESP_OK) err = lighting_output_blackout_immediate();
   if (err != ESP_OK || !lighting_output_dmx_healthy()) {
     if (err == ESP_OK) err = ESP_ERR_INVALID_STATE;
     goto cleanup;
   }
-  err = assignment_v2::confirm_zero_and_persist_epoch(
-      static_cast<uint64_t>(context.assignment_epoch.load()),
-      context.blocked_epoch ? assignment_v2::PersistedState::kBlocked
-                            : assignment_v2::PersistedState::kUnassigned,
-      context.project_id);
-  if (err != ESP_OK) {
-    ESP_LOGE(kTag, "Hub v2 epoch rolled back, changed Project or NVS failed; keep blackout");
-    goto cleanup;
-  }
-  if (context.blocked_epoch) {
-    err = send_text(client, make_blocked_epoch_ack(context));
+
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  if (context.active_epoch) {
+    err = assignment_v2::verify_persisted_blocked_epoch(
+        static_cast<uint64_t>(context.assignment_epoch.load()),
+        context.project_id);
+    if (err != ESP_OK ||
+        lighting_configuration_hash() != context.configuration_hash) {
+      ESP_LOGE(kTag,
+               "ACTIVE scope does not match persisted BLOCKED epoch/config; keep blackout");
+      if (err == ESP_OK) err = ESP_ERR_INVALID_CRC;
+      goto cleanup;
+    }
+
+    std::vector<uint8_t> active_slots;
+    err = lighting_output_read_slots(&active_slots);
+    if (err != ESP_OK || active_slots.size() != kPhysicalDMXChannels) {
+      if (err == ESP_OK) err = ESP_ERR_INVALID_STATE;
+      goto cleanup;
+    }
+    for (uint8_t level : active_slots) {
+      if (level != 0) {
+        err = ESP_ERR_INVALID_STATE;
+        goto cleanup;
+      }
+    }
+
+    err = send_text(client, make_active_scope_ack(context));
     if (err != ESP_OK) goto cleanup;
-    // Receipt only confirms that Hub persisted our software-zero report.
-    // It does not authorize a snapshot, lighting commands or ACTIVE state.
     bits = xEventGroupWaitBits(
         context.events,
-        kEpochReceiptBit | kDisconnectedBit | kProtocolErrorBit,
+        kActiveReadyBit | kDisconnectedBit | kProtocolErrorBit,
         pdFALSE, pdFALSE, pdMS_TO_TICKS(kReadyTimeoutMS));
-    if ((bits & kEpochReceiptBit) == 0) {
+    if ((bits & kActiveReadyBit) == 0 || !context.commands_enabled) {
       err = (bits & kProtocolErrorBit) ? ESP_ERR_INVALID_RESPONSE
                                        : ESP_ERR_TIMEOUT;
       goto cleanup;
     }
-    ESP_LOGI(kTag, "Hub persisted software-zero ACK for BLOCKED epoch");
+    lighting_runtime_authority_acquired();
+    ESP_LOGI(kTag,
+             "Hub ACTIVE lighting scope acknowledged; exact snapshot commands enabled");
+  } else
+#endif
+  {
+    // UNASSIGNED/BLOCKED remains the #22 behavior: persist only anti-rollback
+    // metadata after all-slot zero; this grants no show command authority.
+    err = assignment_v2::confirm_zero_and_persist_epoch(
+        static_cast<uint64_t>(context.assignment_epoch.load()),
+        context.blocked_epoch ? assignment_v2::PersistedState::kBlocked
+                              : assignment_v2::PersistedState::kUnassigned,
+        context.project_id);
+    if (err != ESP_OK) {
+      ESP_LOGE(kTag,
+               "Hub v2 epoch rolled back, changed Project or NVS failed; keep blackout");
+      goto cleanup;
+    }
+    if (context.blocked_epoch) {
+      err = send_text(client, make_blocked_epoch_ack(context));
+      if (err != ESP_OK) goto cleanup;
+      bits = xEventGroupWaitBits(
+          context.events,
+          kEpochReceiptBit | kDisconnectedBit | kProtocolErrorBit,
+          pdFALSE, pdFALSE, pdMS_TO_TICKS(kReadyTimeoutMS));
+      if ((bits & kEpochReceiptBit) == 0) {
+        err = (bits & kProtocolErrorBit) ? ESP_ERR_INVALID_RESPONSE
+                                         : ESP_ERR_TIMEOUT;
+        goto cleanup;
+      }
+      ESP_LOGI(kTag, "Hub persisted software-zero ACK for BLOCKED epoch");
+    }
   }
 #else
   ESP_LOGI(kTag, "Stage Device runtime.ready accepted");
@@ -1321,7 +1748,16 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
   }
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-  ESP_LOGW(kTag, "v2 output remains FAILSAFE; only assignment.blackout accepted");
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  if (context.commands_enabled) {
+    ESP_LOGI(kTag, "v2 ACTIVE lighting runtime ready; readiness=%s",
+             runtime_readiness(&context));
+  } else {
+    ESP_LOGW(kTag, "v2 BLOCKED/UNASSIGNED output remains FAILSAFE");
+  }
+#else
+  ESP_LOGW(kTag, "v2 output remains FAILSAFE; show commands disabled");
+#endif
 #else
   ESP_LOGI(kTag,
            "all seven lighting capabilities enabled; readiness=%s",
@@ -1336,6 +1772,9 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
         kDisconnectedBit | kProtocolErrorBit | kBlackoutBit
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
         | kProbeBit
+#endif
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+        | kLightingActivationBit | kCommandBit
 #endif
         ,
 #else
@@ -1359,6 +1798,24 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
       err = process_pending_blackout(&context, client);
       if (err != ESP_OK) break;
     }
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+    if (bits & kLightingActivationBit) {
+      err = process_pending_activation(&context, client);
+      if (err != ESP_OK) break;
+    }
+    if (bits & kCommandBit) {
+      if (!context.commands_enabled) {
+        err = ESP_ERR_INVALID_STATE;
+        break;
+      }
+      err = process_pending_command(&context, client);
+      if (err != ESP_OK) break;
+    }
+    if (context.commands_enabled) {
+      err = flush_lighting_events(&context, client);
+      if (err != ESP_OK) break;
+    }
+#endif
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
     if (bits & kProbeBit) {
       err = process_pending_probe(&context, client);

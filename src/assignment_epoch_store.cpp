@@ -70,6 +70,32 @@ void encode_epoch(EpochBlob *blob, uint64_t epoch) {
 
 }  // namespace
 
+esp_err_t verify_persisted_blocked_epoch(
+    uint64_t epoch, const std::string &project_id) {
+  if (epoch == 0 || epoch > kMaxEpoch || project_id.size() != 36) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  EpochBlob existing{};
+  bool found = false;
+  esp_err_t err = load_blob(&existing, &found);
+  if (err != ESP_OK) return err;
+  if (!found || decode_epoch(existing) != epoch ||
+      existing[1] != static_cast<uint8_t>(PersistedState::kBlocked)) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  std::array<uint8_t, 32> expected{};
+  if (mbedtls_sha256(
+          reinterpret_cast<const unsigned char *>(project_id.data()),
+          project_id.size(), expected.data(), 0) != 0) {
+    return ESP_FAIL;
+  }
+  return std::memcmp(existing.data() + kDigestOffset,
+                     expected.data(), expected.size()) == 0
+             ? ESP_OK
+             : ESP_ERR_INVALID_STATE;
+}
+
 esp_err_t confirm_zero_and_persist_epoch(
     uint64_t epoch, PersistedState state, const std::string &project_id) {
   const bool blocked = state == PersistedState::kBlocked;
