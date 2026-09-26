@@ -95,12 +95,16 @@ extern "C" void app_main(void) {
     stagecore::run_provisioning_portal(identity.device_id(), fallback_name);
   }
 
-  if (stagecore::connect_station(config.wifi_ssid, config.wifi_password, 30000) !=
-      ESP_OK) {
-    stagecore::run_provisioning_portal(identity.device_id(),
-                                       config.display_name.empty()
-                                           ? fallback_name
-                                           : config.display_name);
+  esp_err_t station_err =
+      stagecore::connect_station(config.wifi_ssid, config.wifi_password, 30000);
+  if (station_err != ESP_OK && station_err != ESP_ERR_TIMEOUT) {
+    hold_safe_failure("configured Stage LAN initialization failed");
+  }
+  while (station_err == ESP_ERR_TIMEOUT) {
+    ESP_LOGW(kTag,
+             "configured Stage LAN still unavailable; DMX remains blackout "
+             "while automatic reconnect continues");
+    station_err = stagecore::wait_for_station_connection(30000);
   }
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
