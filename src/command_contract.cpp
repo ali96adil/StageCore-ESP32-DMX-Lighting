@@ -190,7 +190,9 @@ esp_err_t evaluate_command_execute_frame(
     const std::string &expected_device_id,
     const std::string &expected_project_id,
     CommandDedupeCache *dedupe,
-    CommandDecision *decision) {
+    CommandDecision *decision,
+    int expected_outer_schema,
+    std::string expected_runtime_snapshot_id) {
   if (expected_device_id.empty() || expected_project_id.empty() ||
       dedupe == nullptr || decision == nullptr ||
       frame_json.empty() || frame_json.size() > 8192) {
@@ -219,7 +221,8 @@ esp_err_t evaluate_command_execute_frame(
       number_field(root, "schema_version", &outer_schema) &&
       string_field(root, "device_id", &device_id, true, kMaxID) &&
       type == "command.execute" &&
-      outer_schema == kSchemaVersion &&
+      (expected_outer_schema == 1 || expected_outer_schema == 2) &&
+      outer_schema == expected_outer_schema &&
       device_id == expected_device_id;
 
   const cJSON *command =
@@ -291,13 +294,15 @@ esp_err_t evaluate_command_execute_frame(
 
   if (parsed.schema_version != kSchemaVersion ||
       parsed.project_id != expected_project_id ||
+      (!expected_runtime_snapshot_id.empty() &&
+       parsed.runtime_snapshot_id != expected_runtime_snapshot_id) ||
       !supported_command_type(parsed.command_type)) {
     decision->command = parsed;
     decision->disposition = CommandDisposition::kRejected;
     decision->terminal_result_json =
         rejection(expected_device_id, parsed.command_id,
                   "DEVICE_COMMAND_INVALID", "VALIDATION",
-                  "Command schema, project, or type is not accepted", false);
+                  "Command schema, project, snapshot, or type is not accepted", false);
     dedupe->Remember(parsed.command_id,
                      decision->terminal_result_json);
     cJSON_Delete(root);
