@@ -17,6 +17,8 @@ struct DmxSlotValue {
 esp_err_t lighting_output_apply_slots(
     const std::vector<DmxSlotValue> &updates);
 esp_err_t lighting_output_blackout_immediate();
+// Fresh output-task-backed logical DMX slot snapshot; not a physical decoder measurement.
+esp_err_t lighting_output_read_slots(std::vector<uint8_t> *levels);
 bool lighting_output_dmx_healthy();
 
 }  // namespace stagecore

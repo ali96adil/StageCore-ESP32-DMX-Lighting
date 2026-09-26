@@ -2,6 +2,9 @@ idf_component_register(
     SRCS
         "main.cpp"
         "command_contract.cpp"
+        "assignment_v2.cpp"
+        "state_probe_v2.cpp"
+        "assignment_epoch_store.cpp"
         "config_store.cpp"
         "device_identity.cpp"
         "dmx_driver_diagnostics.c"

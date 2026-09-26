@@ -17,6 +17,10 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 
+#ifndef STAGECORE_EXPERIMENTAL_DEVICE_V2
+#define STAGECORE_EXPERIMENTAL_DEVICE_V2 0
+#endif
+
 namespace stagecore {
 namespace {
 
@@ -113,6 +117,7 @@ std::string form_value(const std::string &body, const std::string &key) {
   return {};
 }
 
+#if !STAGECORE_EXPERIMENTAL_DEVICE_V2
 bool valid_project_id(const std::string &value) {
   if (value.size() != 36) return false;
   for (size_t i = 0; i < value.size(); ++i) {
@@ -125,6 +130,7 @@ bool valid_project_id(const std::string &value) {
   }
   return true;
 }
+#endif
 
 esp_err_t root_handler(httpd_req_t *req) {
   auto *ctx = static_cast<PortalContext *>(req->user_ctx);
@@ -139,14 +145,23 @@ esp_err_t root_handler(httpd_req_t *req) {
       "<p>First-run provisioning. DMX remains at blackout.</p>"
       "<form method='post' action='/save'>"
       "<label>Wi-Fi SSID</label><input name='ssid' maxlength='32' required>"
-      "<label>Wi-Fi password</label><input name='password' type='password' minlength='8' maxlength='63' required>"
+      "<label>Wi-Fi password</label><input name='password' type='password' minlength='8' maxlength='63' required>";
+#if !STAGECORE_EXPERIMENTAL_DEVICE_V2
+  page +=
       "<label>StageCore Project ID</label><input name='project_id' maxlength='36' required "
-      "placeholder='xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'>"
-      "<label>Display name</label><input name='display_name' maxlength='64' value='";
+      "placeholder='xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'>";
+#endif
+  page += "<label>Display name</label><input name='display_name' maxlength='64' value='";
   page += ctx ? ctx->default_display_name : "StageCore Lighting";
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  page +=
+      "' required><small>Device identity is persistent. Assign this node to a Show inside StageCore after pairing. Output stays black until qualified.</small>"
+      "<button type='submit'>Save and restart</button></form></body></html>";
+#else
   page +=
       "' required><small>The Project ID is bootstrap-only. Daily cue authoring stays in StageCore.</small>"
       "<button type='submit'>Save and restart</button></form></body></html>";
+#endif
 
   httpd_resp_set_type(req, "text/html; charset=utf-8");
   return httpd_resp_send(req, page.c_str(), page.size());
@@ -174,12 +189,24 @@ esp_err_t save_handler(httpd_req_t *req) {
   DeviceConfig config;
   config.wifi_ssid = form_value(body, "ssid");
   config.wifi_password = form_value(body, "password");
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  // Reject rather than trust a forged Project claim in an experimental v2
+  // setup request. The Operator assigns Projects using Hub authentication.
+  if (!form_value(body, "project_id").empty()) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Project ID is Hub-owned");
+    return ESP_FAIL;
+  }
+#else
   config.project_id = form_value(body, "project_id");
+#endif
   config.display_name = form_value(body, "display_name");
 
   if (config.wifi_ssid.empty() || config.wifi_ssid.size() > 32 ||
       config.wifi_password.size() < 8 || config.wifi_password.size() > 63 ||
-      !valid_project_id(config.project_id) || config.display_name.empty() ||
+#if !STAGECORE_EXPERIMENTAL_DEVICE_V2
+      !valid_project_id(config.project_id) ||
+#endif
+      config.display_name.empty() ||
       config.display_name.size() > 64) {
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid configuration");
     return ESP_FAIL;
