@@ -134,11 +134,26 @@ cJSON *capabilities_json() {
   return array;
 }
 
-const char *runtime_readiness() {
+const char *runtime_readiness(const RuntimeContext *context = nullptr) {
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-  // Assignment does not yet activate a Project snapshot or project commands.
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  if (context == nullptr || !context->commands_enabled ||
+      !lighting_configuration_ready() ||
+      !lighting_output_dmx_healthy() ||
+      lighting_authority() == "FAILSAFE") {
+    return "BLOCKER";
+  }
+  if (esp_reset_reason() == ESP_RST_BROWNOUT) {
+    return "WARNING";
+  }
+  return "READY";
+#else
+  // Blackout/probe v2 images never claim show readiness.
+  (void)context;
   return "BLOCKER";
 #endif
+#else
+  (void)context;
   if (!lighting_configuration_ready() ||
       !lighting_output_dmx_healthy() ||
       lighting_authority() == "FAILSAFE") {
@@ -148,6 +163,7 @@ const char *runtime_readiness() {
     return "WARNING";
   }
   return "READY";
+#endif
 }
 
 cJSON *observed_state_json(const RuntimeContext *context = nullptr) {
@@ -174,9 +190,13 @@ cJSON *observed_state_json(const RuntimeContext *context = nullptr) {
   }
   // Legacy v1 channel aliases may still exist in NVS for rollback. A v2
   // observation must not present those aliases as an active Project config.
-  const bool expose_legacy_config =
+  bool expose_runtime_config =
       runtime_exposes_legacy_configuration(STAGECORE_EXPERIMENTAL_DEVICE_V2 != 0);
-  if (expose_legacy_config) {
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  expose_runtime_config =
+      expose_runtime_config || (context != nullptr && context->commands_enabled);
+#endif
+  if (expose_runtime_config) {
     for (const auto &entry : lighting_current_levels()) {
       cJSON_AddNumberToObject(levels, entry.channel_key.c_str(), entry.level);
     }
@@ -184,7 +204,7 @@ cJSON *observed_state_json(const RuntimeContext *context = nullptr) {
   cJSON_AddItemToObject(state, "current_levels", levels);
   cJSON_AddBoolToObject(state, "dmx_healthy",
                         lighting_output_dmx_healthy());
-  if (expose_legacy_config) {
+  if (expose_runtime_config) {
     const std::string configuration_hash = lighting_configuration_hash();
     if (!configuration_hash.empty()) {
       cJSON_AddStringToObject(state, "configuration_hash",
@@ -311,7 +331,7 @@ std::string make_observation(const VerifiedHub &hub,
   cJSON_AddNumberToObject(root, "schema_version", 1);
 #endif
   cJSON_AddStringToObject(root, "device_id", identity.device_id().c_str());
-  cJSON_AddStringToObject(root, "readiness", runtime_readiness());
+  cJSON_AddStringToObject(root, "readiness", runtime_readiness(context));
 
   cJSON *observed = observed_state_json(context);
   cJSON *network = network_state_json(hub);
