@@ -832,6 +832,161 @@ esp_err_t process_pending_blackout(RuntimeContext *context,
 }
 #endif
 
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+esp_err_t process_pending_activation(RuntimeContext *context,
+                                     esp_websocket_client_handle_t client) {
+  if (context == nullptr || context->command_lock == nullptr || client == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  std::string frame;
+  if (xSemaphoreTake(context->command_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  frame.swap(context->pending_activation_frame);
+  xSemaphoreGive(context->command_lock);
+  xEventGroupClearBits(context->events, kLightingActivationBit);
+  if (frame.empty()) return ESP_ERR_INVALID_STATE;
+
+  cJSON *root = cJSON_ParseWithLength(frame.data(), frame.size());
+  if (root == nullptr) return ESP_ERR_INVALID_RESPONSE;
+  const cJSON *activation =
+      cJSON_GetObjectItemCaseSensitive(root, "activation_id");
+  const cJSON *project =
+      cJSON_GetObjectItemCaseSensitive(root, "project_id");
+  const cJSON *snapshot =
+      cJSON_GetObjectItemCaseSensitive(root, "runtime_snapshot_id");
+  const cJSON *nonce =
+      cJSON_GetObjectItemCaseSensitive(root, "challenge");
+  const cJSON *configuration =
+      cJSON_GetObjectItemCaseSensitive(root, "configuration");
+  const cJSON *configuration_hash =
+      cJSON_GetObjectItemCaseSensitive(root, "configuration_hash");
+  int64_t epoch = 0;
+  int64_t generation = 0;
+  int64_t channels = 0;
+  const bool scope_ok =
+      context->blocked_epoch && !context->active_epoch &&
+      positive_wire_integer(root, "assignment_epoch", &epoch) &&
+      epoch == context->assignment_epoch.load() &&
+      positive_wire_integer(root, "connection_generation", &generation) &&
+      generation == context->connection_generation &&
+      positive_wire_integer(root, "expected_channels", &channels) &&
+      channels == kPhysicalDMXChannels &&
+      cJSON_IsString(activation) && activation->valuestring &&
+      std::strlen(activation->valuestring) == 36 &&
+      cJSON_IsString(project) && project->valuestring &&
+      context->project_id == project->valuestring &&
+      cJSON_IsString(snapshot) && snapshot->valuestring &&
+      snapshot->valuestring[0] != '\0' &&
+      canonical_hex_nonce(nonce) &&
+      canonical_hex_nonce(configuration_hash) &&
+      cJSON_IsObject(configuration);
+  if (!scope_ok) {
+    cJSON_Delete(root);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  cJSON *payload_root = cJSON_CreateObject();
+  cJSON *configuration_copy = cJSON_Duplicate(configuration, true);
+  if (payload_root == nullptr || configuration_copy == nullptr ||
+      !cJSON_AddItemToObject(payload_root, "configuration",
+                             configuration_copy)) {
+    if (configuration_copy != nullptr &&
+        (payload_root == nullptr ||
+         cJSON_GetObjectItemCaseSensitive(payload_root, "configuration") == nullptr)) {
+      cJSON_Delete(configuration_copy);
+    }
+    if (payload_root != nullptr) cJSON_Delete(payload_root);
+    cJSON_Delete(root);
+    return ESP_ERR_NO_MEM;
+  }
+  const std::string payload_json = print_json(payload_root);
+  cJSON_Delete(payload_root);
+  if (payload_json.empty()) {
+    cJSON_Delete(root);
+    return ESP_ERR_NO_MEM;
+  }
+
+  CommandEnvelopeV1 config_command;
+  config_command.command_type = "LIGHTING_CONFIG_APPLY";
+  config_command.payload_json = payload_json;
+  LightingPayloadV1 payload;
+  std::string payload_error;
+  esp_err_t err =
+      validate_lighting_payload(config_command, &payload, &payload_error);
+  if (err != ESP_OK) {
+    cJSON_Delete(root);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  // Stay fail-closed before, during and after persistence of the new Project
+  // configuration. CONFIG_APPLY may update NVS, but it never grants command
+  // authority; the Hub must still commit ACTIVE and force a fresh reconnect.
+  err = lighting_blackout(true);
+  if (err == ESP_OK) err = lighting_output_blackout_immediate();
+  if (err != ESP_OK || !lighting_output_dmx_healthy()) {
+    cJSON_Delete(root);
+    return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
+  }
+
+  std::string applied_hash;
+  err = lighting_configuration_apply(payload.configuration, &applied_hash);
+  if (err != ESP_OK ||
+      applied_hash != std::string(configuration_hash->valuestring)) {
+    (void)lighting_blackout(true);
+    (void)lighting_output_blackout_immediate();
+    cJSON_Delete(root);
+    return err != ESP_OK ? err : ESP_ERR_INVALID_CRC;
+  }
+
+  err = lighting_blackout(true);
+  if (err == ESP_OK) err = lighting_output_blackout_immediate();
+  std::vector<uint8_t> slots;
+  if (err == ESP_OK) err = lighting_output_read_slots(&slots);
+  if (err != ESP_OK || !lighting_output_dmx_healthy() ||
+      slots.size() != kPhysicalDMXChannels) {
+    cJSON_Delete(root);
+    return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
+  }
+  for (uint8_t level : slots) {
+    if (level != 0) {
+      cJSON_Delete(root);
+      return ESP_ERR_INVALID_STATE;
+    }
+  }
+
+  cJSON *ack = cJSON_CreateObject();
+  cJSON *levels = cJSON_CreateArray();
+  if (ack == nullptr || levels == nullptr) {
+    if (ack != nullptr) cJSON_Delete(ack);
+    if (levels != nullptr) cJSON_Delete(levels);
+    cJSON_Delete(root);
+    return ESP_ERR_NO_MEM;
+  }
+  cJSON_AddStringToObject(ack, "type", "lighting.assignment.activate_ack");
+  cJSON_AddNumberToObject(ack, "schema_version", 2);
+  cJSON_AddStringToObject(ack, "device_id", context->device_id.c_str());
+  cJSON_AddStringToObject(ack, "activation_id", activation->valuestring);
+  cJSON_AddStringToObject(ack, "project_id", project->valuestring);
+  cJSON_AddStringToObject(ack, "runtime_snapshot_id", snapshot->valuestring);
+  cJSON_AddNumberToObject(ack, "assignment_epoch",
+                          static_cast<double>(epoch));
+  cJSON_AddNumberToObject(ack, "connection_generation",
+                          static_cast<double>(generation));
+  cJSON_AddStringToObject(ack, "challenge", nonce->valuestring);
+  cJSON_AddStringToObject(ack, "configuration_hash", applied_hash.c_str());
+  cJSON_AddBoolToObject(ack, "blackout", true);
+  for (uint8_t level : slots) {
+    cJSON_AddItemToArray(levels, cJSON_CreateNumber(level));
+  }
+  cJSON_AddItemToObject(ack, "channel_levels", levels);
+  const std::string response = print_json(ack);
+  cJSON_Delete(ack);
+  cJSON_Delete(root);
+  return send_text(client, response);
+}
+#endif
+
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
 esp_err_t process_pending_probe(RuntimeContext *context,
                                 esp_websocket_client_handle_t client) {
@@ -930,6 +1085,45 @@ std::string make_blocked_epoch_ack(const RuntimeContext &context) {
                           static_cast<double>(context.assignment_epoch.load()));
   cJSON_AddNumberToObject(root, "connection_generation",
                           static_cast<double>(context.connection_generation));
+  cJSON_AddBoolToObject(root, "blackout", true);
+  for (int i = 0; i < kPhysicalDMXChannels; ++i) {
+    cJSON_AddItemToArray(levels, cJSON_CreateNumber(0));
+  }
+  cJSON_AddItemToObject(root, "channel_levels", levels);
+  const std::string result = print_json(root);
+  cJSON_Delete(root);
+  return result;
+}
+#endif
+
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+std::string make_active_scope_ack(const RuntimeContext &context) {
+  if (!context.active_epoch || context.commands_enabled ||
+      context.project_id.empty() || context.runtime_snapshot_id.empty() ||
+      context.configuration_hash.size() != 64 ||
+      context.assignment_epoch.load() <= 1 ||
+      context.connection_generation <= 0) {
+    return {};
+  }
+  cJSON *root = cJSON_CreateObject();
+  cJSON *levels = cJSON_CreateArray();
+  if (root == nullptr || levels == nullptr) {
+    if (root != nullptr) cJSON_Delete(root);
+    if (levels != nullptr) cJSON_Delete(levels);
+    return {};
+  }
+  cJSON_AddStringToObject(root, "type", "lighting.assignment.scope_ack");
+  cJSON_AddNumberToObject(root, "schema_version", 2);
+  cJSON_AddStringToObject(root, "device_id", context.device_id.c_str());
+  cJSON_AddStringToObject(root, "project_id", context.project_id.c_str());
+  cJSON_AddStringToObject(root, "runtime_snapshot_id",
+                          context.runtime_snapshot_id.c_str());
+  cJSON_AddNumberToObject(root, "assignment_epoch",
+                          static_cast<double>(context.assignment_epoch.load()));
+  cJSON_AddNumberToObject(root, "connection_generation",
+                          static_cast<double>(context.connection_generation));
+  cJSON_AddStringToObject(root, "configuration_hash",
+                          context.configuration_hash.c_str());
   cJSON_AddBoolToObject(root, "blackout", true);
   for (int i = 0; i < kPhysicalDMXChannels; ++i) {
     cJSON_AddItemToArray(levels, cJSON_CreateNumber(0));
