@@ -402,20 +402,49 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
         std::strcmp(state->valuestring, "UNASSIGNED") == 0;
     const bool blocked = cJSON_IsString(state) && state->valuestring &&
         std::strcmp(state->valuestring, "BLOCKED") == 0;
+    bool active = false;
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+    const cJSON *snapshot =
+        cJSON_GetObjectItemCaseSensitive(root, "runtime_snapshot_id");
+    const cJSON *configuration_hash =
+        cJSON_GetObjectItemCaseSensitive(root, "configuration_hash");
+    const cJSON *scope_ack_required =
+        cJSON_GetObjectItemCaseSensitive(root, "scope_ack_required");
+    active = cJSON_IsString(state) && state->valuestring &&
+        std::strcmp(state->valuestring, "ACTIVE") == 0;
+#endif
     const bool project_unassigned = project == nullptr ||
-        (cJSON_IsString(project) && project->valuestring && project->valuestring[0] == '\0');
-    const bool project_blocked = cJSON_IsString(project) && project->valuestring &&
-        project->valuestring[0] != '\0';
+        (cJSON_IsString(project) && project->valuestring &&
+         project->valuestring[0] == '\0');
+    const bool project_assigned = cJSON_IsString(project) &&
+        project->valuestring && project->valuestring[0] != '\0';
+    bool assignment_shape =
+        (unassigned && project_unassigned && ack_required == nullptr) ||
+        (blocked && project_assigned && epoch > 1 && cJSON_IsTrue(ack_required));
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+    assignment_shape = assignment_shape ||
+        (active && project_assigned && epoch > 1 &&
+         cJSON_IsString(snapshot) && snapshot->valuestring &&
+         snapshot->valuestring[0] != '\0' &&
+         canonical_hex_nonce(configuration_hash) &&
+         cJSON_IsTrue(scope_ack_required) && ack_required == nullptr);
+#endif
     ok = positive_wire_integer(root, "assignment_epoch", &epoch) &&
          positive_wire_integer(root, "connection_generation", &generation) &&
-         ((unassigned && project_unassigned && ack_required == nullptr) ||
-          (blocked && project_blocked && epoch > 1 && cJSON_IsTrue(ack_required))) &&
-         cJSON_IsTrue(blackout) && cJSON_IsFalse(commands) &&
-         context->assignment_epoch.load() == 0;
+         assignment_shape && cJSON_IsTrue(blackout) &&
+         cJSON_IsFalse(commands) && context->assignment_epoch.load() == 0;
     if (ok) {
-      context->project_id = blocked ? project->valuestring : "";
+      context->project_id = (blocked || active) ? project->valuestring : "";
       context->connection_generation = generation;
       context->blocked_epoch = blocked;
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+      context->active_epoch = active;
+      context->commands_enabled = false;
+      if (active) {
+        context->runtime_snapshot_id = snapshot->valuestring;
+        context->configuration_hash = configuration_hash->valuestring;
+      }
+#endif
       context->assignment_epoch.store(epoch);
       xEventGroupSetBits(context->events, kReadyBit);
     }
@@ -442,6 +471,9 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
           || !context->pending_probe_frame.empty()
 #endif
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+          || !context->pending_activation_frame.empty()
+#endif
           ) {
         ok = false;
       } else {
@@ -452,6 +484,63 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     } else {
       ok = false;
     }
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  } else if (ok && std::strcmp(type->valuestring, "lighting.assignment.activate") == 0) {
+    int64_t epoch = 0;
+    int64_t generation = 0;
+    int64_t channels = 0;
+    const cJSON *activation =
+        cJSON_GetObjectItemCaseSensitive(root, "activation_id");
+    const cJSON *project =
+        cJSON_GetObjectItemCaseSensitive(root, "project_id");
+    const cJSON *snapshot =
+        cJSON_GetObjectItemCaseSensitive(root, "runtime_snapshot_id");
+    const cJSON *nonce =
+        cJSON_GetObjectItemCaseSensitive(root, "challenge");
+    const cJSON *configuration =
+        cJSON_GetObjectItemCaseSensitive(root, "configuration");
+    const cJSON *configuration_hash =
+        cJSON_GetObjectItemCaseSensitive(root, "configuration_hash");
+    const cJSON *required =
+        cJSON_GetObjectItemCaseSensitive(root, "blackout_required");
+    const cJSON *commands =
+        cJSON_GetObjectItemCaseSensitive(root, "commands_enabled");
+    ok = context->blocked_epoch && !context->active_epoch &&
+         context->assignment_epoch.load() > 1 &&
+         positive_wire_integer(root, "assignment_epoch", &epoch) &&
+         epoch == context->assignment_epoch.load() &&
+         positive_wire_integer(root, "connection_generation", &generation) &&
+         generation == context->connection_generation &&
+         positive_wire_integer(root, "expected_channels", &channels) &&
+         channels == kPhysicalDMXChannels &&
+         cJSON_IsString(activation) && activation->valuestring &&
+         std::strlen(activation->valuestring) == 36 &&
+         cJSON_IsString(project) && project->valuestring &&
+         context->project_id == project->valuestring &&
+         cJSON_IsString(snapshot) && snapshot->valuestring &&
+         snapshot->valuestring[0] != '\0' &&
+         canonical_hex_nonce(nonce) &&
+         canonical_hex_nonce(configuration_hash) &&
+         cJSON_IsObject(configuration) &&
+         cJSON_IsTrue(required) && cJSON_IsFalse(commands);
+    if (ok && context->command_lock != nullptr &&
+        xSemaphoreTake(context->command_lock, 0) == pdTRUE) {
+      if (!context->pending_blackout_frame.empty() ||
+          !context->pending_activation_frame.empty()
+#if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+          || !context->pending_probe_frame.empty()
+#endif
+          || !context->pending_command_frame.empty()) {
+        ok = false;
+      } else {
+        context->pending_activation_frame = text;
+        xEventGroupSetBits(context->events, kLightingActivationBit);
+      }
+      xSemaphoreGive(context->command_lock);
+    } else {
+      ok = false;
+    }
+#endif
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
   } else if (ok && std::strcmp(type->valuestring, "lighting.state_probe") == 0) {
     int64_t epoch = 0;
@@ -474,7 +563,11 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     if (ok && context->command_lock != nullptr &&
         xSemaphoreTake(context->command_lock, 0) == pdTRUE) {
       if (!context->pending_blackout_frame.empty() ||
-          !context->pending_probe_frame.empty()) {
+          !context->pending_probe_frame.empty()
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+          || !context->pending_activation_frame.empty()
+#endif
+          ) {
         ok = false;
       } else {
         context->pending_probe_frame = text;
@@ -503,9 +596,58 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
          generation == context->connection_generation &&
          cJSON_IsTrue(persisted) && cJSON_IsFalse(commands);
     if (ok) xEventGroupSetBits(context->events, kEpochReceiptBit);
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  } else if (ok && std::strcmp(type->valuestring, "runtime.ready") == 0) {
+    const cJSON *protocol =
+        cJSON_GetObjectItemCaseSensitive(root, "protocol_version");
+    const cJSON *project =
+        cJSON_GetObjectItemCaseSensitive(root, "project_id");
+    const cJSON *snapshot =
+        cJSON_GetObjectItemCaseSensitive(root, "runtime_snapshot_id");
+    const cJSON *configuration_hash =
+        cJSON_GetObjectItemCaseSensitive(root, "configuration_hash");
+    const cJSON *commands =
+        cJSON_GetObjectItemCaseSensitive(root, "commands_enabled");
+    int64_t epoch = 0;
+    int64_t generation = 0;
+    ok = context->active_epoch && !context->commands_enabled &&
+         cJSON_IsString(protocol) && protocol->valuestring &&
+         std::strcmp(protocol->valuestring, kProtocolVersion) == 0 &&
+         cJSON_IsString(project) && project->valuestring &&
+         context->project_id == project->valuestring &&
+         cJSON_IsString(snapshot) && snapshot->valuestring &&
+         context->runtime_snapshot_id == snapshot->valuestring &&
+         canonical_hex_nonce(configuration_hash) &&
+         context->configuration_hash == configuration_hash->valuestring &&
+         positive_wire_integer(root, "assignment_epoch", &epoch) &&
+         epoch == context->assignment_epoch.load() &&
+         positive_wire_integer(root, "connection_generation", &generation) &&
+         generation == context->connection_generation &&
+         cJSON_IsTrue(commands);
+    if (ok) {
+      context->commands_enabled = true;
+      xEventGroupSetBits(context->events, kActiveReadyBit);
+    }
+  } else if (ok && std::strcmp(type->valuestring, "command.execute") == 0) {
+    ok = context->active_epoch && context->commands_enabled &&
+         context->command_lock != nullptr &&
+         xSemaphoreTake(context->command_lock, 0) == pdTRUE;
+    if (ok) {
+      if (!context->pending_command_frame.empty() ||
+          !context->pending_activation_frame.empty() ||
+          !context->pending_blackout_frame.empty()) {
+        ok = false;
+      } else {
+        context->pending_command_frame = text;
+        xEventGroupSetBits(context->events, kCommandBit);
+      }
+      xSemaphoreGive(context->command_lock);
+    }
+#endif
   } else {
-    // Never accept command.execute, runtime.ready, project activation or
-    // unsupported messages in the blackout-only experimental image.
+    // Blackout-only v2 images never accept show commands or ACTIVE state.
+    // The active source-only image reaches command.execute only after the
+    // exact Hub-owned Project/Snapshot/config scope handshake above.
     ok = false;
   }
 #else
