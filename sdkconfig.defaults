@@ -23,6 +23,12 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 # separately before the first real flash.
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
+# esp_dmx is consumed through PlatformIO lib_deps, so its component Kconfig
+# selections are not imported into the generated application sdkconfig.
+# Mirror the upstream CONFIG_DMX_ISR_IN_IRAM requirements explicitly. ESP-IDF
+# 5.5 renamed GPTIMER_ISR_IRAM_SAFE to GPTIMER_ISR_CACHE_SAFE.
+CONFIG_GPTIMER_ISR_CACHE_SAFE=y
+CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM=y
 
 # Physical StageCore lighting nodes use 4 MiB ESP32-WROOM flash.
 # Keep ESP-IDF's generated flash-size choice aligned with the board target

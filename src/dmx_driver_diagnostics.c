@@ -2,7 +2,24 @@
 
 #include <string.h>
 
+#include "sdkconfig.h"
 #include "dmx/include/service.h"
+
+#if !defined(CONFIG_DMX_ISR_IN_IRAM) || !CONFIG_DMX_ISR_IN_IRAM
+#error "StageCore requires esp_dmx ISR functions to be compiled into IRAM"
+#endif
+
+#if !defined(CONFIG_GPTIMER_ISR_CACHE_SAFE) || !CONFIG_GPTIMER_ISR_CACHE_SAFE
+#error "StageCore requires cache-safe GPTimer ISR execution for DMX"
+#endif
+
+#if !defined(CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM) || !CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM
+#error "StageCore requires the GPTimer ISR handler in IRAM for DMX"
+#endif
+
+#if !defined(CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM) || !CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM
+#error "StageCore requires GPTimer control functions in IRAM for DMX"
+#endif
 
 bool stagecore_dmx_capture_driver_snapshot(
     int dmx_port, stagecore_dmx_driver_snapshot_t *snapshot) {
