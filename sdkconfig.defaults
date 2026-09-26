@@ -34,3 +34,7 @@ CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM=y
 # Keep ESP-IDF's generated flash-size choice aligned with the board target
 # and the physically qualified hardware.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# The qualified board reports a BOYA SPI flash part. Link ESP-IDF's explicit
+# BOYA chip driver so boot does not fall back to the generic flash driver.
+CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP=y
