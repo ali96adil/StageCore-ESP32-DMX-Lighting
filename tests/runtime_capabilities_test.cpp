@@ -42,7 +42,7 @@ int main() {
       assert(capability != "lighting.blackout");
     }
   }
-  const auto v2_active = runtime_advertised_capabilities(true, true, true);
+  const auto v2_active = stagecore::runtime_advertised_capabilities(true, true, true);
   assert(std::find(v2_active.begin(), v2_active.end(),
                    std::string("lighting.channels.set")) != v2_active.end());
   assert(std::find(v2_active.begin(), v2_active.end(),
