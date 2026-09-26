@@ -1655,40 +1655,85 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
   }
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-  ESP_LOGW(kTag, "v2 Hub assignment received; project commands disabled");
-  // Neither a Hub assignment nor this software-zero report activates DMX
-  // channels. Always cancel fades/events and write all 12 physical slots to
-  // zero before persisting the Hub epoch or acknowledging it.
+  ESP_LOGW(kTag, "v2 Hub assignment received; output starts in FAILSAFE blackout");
+  // Every v2 connection begins with a software-confirmed all-slot blackout.
+  // ACTIVE reconnect is Hub-owned and does not persist ACTIVE authority locally.
   err = lighting_blackout(true);
   if (err == ESP_OK) err = lighting_output_blackout_immediate();
   if (err != ESP_OK || !lighting_output_dmx_healthy()) {
     if (err == ESP_OK) err = ESP_ERR_INVALID_STATE;
     goto cleanup;
   }
-  err = assignment_v2::confirm_zero_and_persist_epoch(
-      static_cast<uint64_t>(context.assignment_epoch.load()),
-      context.blocked_epoch ? assignment_v2::PersistedState::kBlocked
-                            : assignment_v2::PersistedState::kUnassigned,
-      context.project_id);
-  if (err != ESP_OK) {
-    ESP_LOGE(kTag, "Hub v2 epoch rolled back, changed Project or NVS failed; keep blackout");
-    goto cleanup;
-  }
-  if (context.blocked_epoch) {
-    err = send_text(client, make_blocked_epoch_ack(context));
+
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  if (context.active_epoch) {
+    err = assignment_v2::verify_persisted_blocked_epoch(
+        static_cast<uint64_t>(context.assignment_epoch.load()),
+        context.project_id);
+    if (err != ESP_OK ||
+        lighting_configuration_hash() != context.configuration_hash) {
+      ESP_LOGE(kTag,
+               "ACTIVE scope does not match persisted BLOCKED epoch/config; keep blackout");
+      if (err == ESP_OK) err = ESP_ERR_INVALID_CRC;
+      goto cleanup;
+    }
+
+    std::vector<uint8_t> active_slots;
+    err = lighting_output_read_slots(&active_slots);
+    if (err != ESP_OK || active_slots.size() != kPhysicalDMXChannels) {
+      if (err == ESP_OK) err = ESP_ERR_INVALID_STATE;
+      goto cleanup;
+    }
+    for (uint8_t level : active_slots) {
+      if (level != 0) {
+        err = ESP_ERR_INVALID_STATE;
+        goto cleanup;
+      }
+    }
+
+    err = send_text(client, make_active_scope_ack(context));
     if (err != ESP_OK) goto cleanup;
-    // Receipt only confirms that Hub persisted our software-zero report.
-    // It does not authorize a snapshot, lighting commands or ACTIVE state.
     bits = xEventGroupWaitBits(
         context.events,
-        kEpochReceiptBit | kDisconnectedBit | kProtocolErrorBit,
+        kActiveReadyBit | kDisconnectedBit | kProtocolErrorBit,
         pdFALSE, pdFALSE, pdMS_TO_TICKS(kReadyTimeoutMS));
-    if ((bits & kEpochReceiptBit) == 0) {
+    if ((bits & kActiveReadyBit) == 0 || !context.commands_enabled) {
       err = (bits & kProtocolErrorBit) ? ESP_ERR_INVALID_RESPONSE
                                        : ESP_ERR_TIMEOUT;
       goto cleanup;
     }
-    ESP_LOGI(kTag, "Hub persisted software-zero ACK for BLOCKED epoch");
+    lighting_runtime_authority_acquired();
+    ESP_LOGI(kTag,
+             "Hub ACTIVE lighting scope acknowledged; exact snapshot commands enabled");
+  } else
+#endif
+  {
+    // UNASSIGNED/BLOCKED remains the #22 behavior: persist only anti-rollback
+    // metadata after all-slot zero; this grants no show command authority.
+    err = assignment_v2::confirm_zero_and_persist_epoch(
+        static_cast<uint64_t>(context.assignment_epoch.load()),
+        context.blocked_epoch ? assignment_v2::PersistedState::kBlocked
+                              : assignment_v2::PersistedState::kUnassigned,
+        context.project_id);
+    if (err != ESP_OK) {
+      ESP_LOGE(kTag,
+               "Hub v2 epoch rolled back, changed Project or NVS failed; keep blackout");
+      goto cleanup;
+    }
+    if (context.blocked_epoch) {
+      err = send_text(client, make_blocked_epoch_ack(context));
+      if (err != ESP_OK) goto cleanup;
+      bits = xEventGroupWaitBits(
+          context.events,
+          kEpochReceiptBit | kDisconnectedBit | kProtocolErrorBit,
+          pdFALSE, pdFALSE, pdMS_TO_TICKS(kReadyTimeoutMS));
+      if ((bits & kEpochReceiptBit) == 0) {
+        err = (bits & kProtocolErrorBit) ? ESP_ERR_INVALID_RESPONSE
+                                         : ESP_ERR_TIMEOUT;
+        goto cleanup;
+      }
+      ESP_LOGI(kTag, "Hub persisted software-zero ACK for BLOCKED epoch");
+    }
   }
 #else
   ESP_LOGI(kTag, "Stage Device runtime.ready accepted");
@@ -1703,7 +1748,16 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
   }
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-  ESP_LOGW(kTag, "v2 output remains FAILSAFE; only assignment.blackout accepted");
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  if (context.commands_enabled) {
+    ESP_LOGI(kTag, "v2 ACTIVE lighting runtime ready; readiness=%s",
+             runtime_readiness(&context));
+  } else {
+    ESP_LOGW(kTag, "v2 BLOCKED/UNASSIGNED output remains FAILSAFE");
+  }
+#else
+  ESP_LOGW(kTag, "v2 output remains FAILSAFE; show commands disabled");
+#endif
 #else
   ESP_LOGI(kTag,
            "all seven lighting capabilities enabled; readiness=%s",
@@ -1718,6 +1772,9 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
         kDisconnectedBit | kProtocolErrorBit | kBlackoutBit
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
         | kProbeBit
+#endif
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+        | kLightingActivationBit | kCommandBit
 #endif
         ,
 #else
@@ -1741,6 +1798,24 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
       err = process_pending_blackout(&context, client);
       if (err != ESP_OK) break;
     }
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+    if (bits & kLightingActivationBit) {
+      err = process_pending_activation(&context, client);
+      if (err != ESP_OK) break;
+    }
+    if (bits & kCommandBit) {
+      if (!context.commands_enabled) {
+        err = ESP_ERR_INVALID_STATE;
+        break;
+      }
+      err = process_pending_command(&context, client);
+      if (err != ESP_OK) break;
+    }
+    if (context.commands_enabled) {
+      err = flush_lighting_events(&context, client);
+      if (err != ESP_OK) break;
+    }
+#endif
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
     if (bits & kProbeBit) {
       err = process_pending_probe(&context, client);
