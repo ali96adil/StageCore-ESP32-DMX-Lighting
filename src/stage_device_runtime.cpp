@@ -418,21 +418,25 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
          project->valuestring[0] == '\0');
     const bool project_assigned = cJSON_IsString(project) &&
         project->valuestring && project->valuestring[0] != '\0';
-    bool assignment_shape =
-        (unassigned && project_unassigned && ack_required == nullptr) ||
-        (blocked && project_assigned && epoch > 1 && cJSON_IsTrue(ack_required));
+    const bool base_shape =
+        unassigned && project_unassigned && ack_required == nullptr;
+    const bool blocked_shape =
+        blocked && project_assigned && cJSON_IsTrue(ack_required);
 #if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
-    assignment_shape = assignment_shape ||
-        (active && project_assigned && epoch > 1 &&
-         cJSON_IsString(snapshot) && snapshot->valuestring &&
-         snapshot->valuestring[0] != '\0' &&
-         canonical_hex_nonce(configuration_hash) &&
-         cJSON_IsTrue(scope_ack_required) && ack_required == nullptr);
+    const bool active_shape =
+        active && project_assigned &&
+        cJSON_IsString(snapshot) && snapshot->valuestring &&
+        snapshot->valuestring[0] != '\0' &&
+        canonical_hex_nonce(configuration_hash) &&
+        cJSON_IsTrue(scope_ack_required) && ack_required == nullptr;
+#else
+    const bool active_shape = false;
 #endif
     ok = positive_wire_integer(root, "assignment_epoch", &epoch) &&
          positive_wire_integer(root, "connection_generation", &generation) &&
-         assignment_shape && cJSON_IsTrue(blackout) &&
-         cJSON_IsFalse(commands) && context->assignment_epoch.load() == 0;
+         (base_shape || ((blocked_shape || active_shape) && epoch > 1)) &&
+         cJSON_IsTrue(blackout) && cJSON_IsFalse(commands) &&
+         context->assignment_epoch.load() == 0;
     if (ok) {
       context->project_id = (blocked || active) ? project->valuestring : "";
       context->connection_generation = generation;
