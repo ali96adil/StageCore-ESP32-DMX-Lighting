@@ -1261,9 +1261,15 @@ esp_err_t process_pending_command(RuntimeContext *context,
   if (frame.empty()) return ESP_OK;
 
   CommandDecision decision;
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2 && STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  esp_err_t err = evaluate_command_execute_frame(
+      frame, context->device_id, context->project_id,
+      &context->dedupe, &decision, 2, context->runtime_snapshot_id);
+#else
   esp_err_t err = evaluate_command_execute_frame(
       frame, context->device_id, context->project_id,
       &context->dedupe, &decision);
+#endif
   if (err != ESP_OK) {
     ESP_LOGE(kTag, "malformed command.execute frame; closing runtime");
     return err;
