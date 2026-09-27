@@ -19,6 +19,7 @@ idf_component_register(
         "trusted_clock.cpp"
     INCLUDE_DIRS "."
     REQUIRES
+        driver
         esp_event
         esp_http_client
         esp_http_server
