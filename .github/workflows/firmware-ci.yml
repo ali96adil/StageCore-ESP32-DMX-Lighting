@@ -127,7 +127,10 @@ jobs:
           rm -rf "$OUT"
           mkdir -p "$OUT"
           cp "$SRC" "$OUT/firmware.bin"
-          sha256sum "$OUT/firmware.bin" > "$OUT/SHA256SUMS"
+          (
+            cd "$OUT"
+            sha256sum firmware.bin > SHA256SUMS
+          )
           {
             echo "source_revision=$EXPECTED_SHA"
             echo "platformio=6.2.0"

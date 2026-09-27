@@ -109,8 +109,21 @@ extern "C" void app_main(void) {
   }
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-  ESP_LOGW(kTag, "EXPERIMENTAL v2: projectless, blackout-only image; device=%s",
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL v2 ACTIVE candidate: projectless; Hub-owned exact "
+           "scope required before commands; device=%s",
            identity.device_id().c_str());
+#elif STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL v2 read-only probe: projectless, blackout-only; "
+           "device=%s",
+           identity.device_id().c_str());
+#else
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL v2 blackout-only: projectless; device=%s",
+           identity.device_id().c_str());
+#endif
 #else
   ESP_LOGI(kTag, "provisioned for project %s as %s",
            config.project_id.c_str(), config.display_name.c_str());
