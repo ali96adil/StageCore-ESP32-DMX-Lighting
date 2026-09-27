@@ -10,6 +10,7 @@
 #include "hub_security.h"
 #include "lighting_configuration.h"
 #include "lighting_output.h"
+#include "local_recovery.h"
 #include "nvs_flash.h"
 #include "provisioning.h"
 #include "stage_device_runtime.h"
@@ -93,6 +94,13 @@ extern "C" void app_main(void) {
   const std::string fallback_name = default_display_name(identity.device_id());
   if (!config.complete()) {
     stagecore::run_provisioning_portal(identity.device_id(), fallback_name);
+  }
+
+  const esp_err_t recovery_err =
+      stagecore::start_local_hub_trust_reset_monitor();
+  if (recovery_err != ESP_OK) {
+    ESP_LOGE(kTag, "local Hub trust recovery unavailable: %s",
+             esp_err_to_name(recovery_err));
   }
 
   if (stagecore::connect_station(config.wifi_ssid, config.wifi_password, 30000) !=
