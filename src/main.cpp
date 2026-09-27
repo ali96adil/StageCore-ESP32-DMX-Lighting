@@ -152,12 +152,19 @@ extern "C" void app_main(void) {
       ESP_LOGE(kTag, "failsafe blackout fallback failed after runtime exit: %s",
                esp_err_to_name(failsafe_err));
     }
-    ESP_LOGW(kTag,
-             "Stage Device runtime ended (%s); failsafe policy hold=%lldms "
-             "fade=%lldms completed before re-authentication",
-             esp_err_to_name(runtime_err),
-             static_cast<long long>(stagecore::kConnectionLossHoldMs),
-             static_cast<long long>(stagecore::kConnectionLossFadeMs));
+    if (failsafe_err == ESP_OK) {
+      ESP_LOGW(kTag,
+               "Stage Device runtime ended (%s); failsafe policy hold=%lldms "
+               "fade=%lldms reached blackout before re-authentication",
+               esp_err_to_name(runtime_err),
+               static_cast<long long>(stagecore::kConnectionLossHoldMs),
+               static_cast<long long>(stagecore::kConnectionLossFadeMs));
+    } else {
+      ESP_LOGE(kTag,
+               "Stage Device runtime ended (%s); local failsafe could not "
+               "confirm blackout before re-authentication",
+               esp_err_to_name(runtime_err));
+    }
     credential = stagecore::RuntimeCredential{};
     vTaskDelay(pdMS_TO_TICKS(2000));
   }

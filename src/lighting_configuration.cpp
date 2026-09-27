@@ -1,5 +1,6 @@
 #include "lighting_configuration.h"
 
+#include "connection_loss_failsafe_policy.h"
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -1145,8 +1146,8 @@ esp_err_t lighting_connection_loss_failsafe(
   // scheduler/output confirmation margin; timeout is handled by the caller
   // with the existing immediate blackout fallback.
   const TickType_t started = xTaskGetTickCount();
-  const TickType_t timeout =
-      pdMS_TO_TICKS(static_cast<uint32_t>(fade_ms + 500));
+  const TickType_t timeout = pdMS_TO_TICKS(
+      static_cast<uint32_t>(fade_ms + kConnectionLossSettleMarginMs));
   while (static_cast<TickType_t>(xTaskGetTickCount() - started) < timeout) {
     bool active = true;
     bool zero = false;
