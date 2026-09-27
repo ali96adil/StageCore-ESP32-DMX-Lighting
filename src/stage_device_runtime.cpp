@@ -32,6 +32,10 @@
 #define STAGECORE_FW_VERSION "0.2.0-dev"
 #endif
 
+#ifndef STAGECORE_BUILD_REVISION
+#define STAGECORE_BUILD_REVISION "unknown"
+#endif
+
 #ifndef STAGECORE_EXPERIMENTAL_DEVICE_V2
 #define STAGECORE_EXPERIMENTAL_DEVICE_V2 0
 #endif
@@ -173,9 +177,11 @@ cJSON *observed_state_json(const RuntimeContext *context = nullptr) {
 
   cJSON_AddNumberToObject(state, "schema_version", 1);
   cJSON_AddStringToObject(state, "firmware_version", STAGECORE_FW_VERSION);
+  cJSON_AddStringToObject(
+      state, "firmware_build_revision", STAGECORE_BUILD_REVISION);
   const esp_app_desc_t *app = esp_app_get_description();
   if (app != nullptr && app->version[0] != '\0') {
-    cJSON_AddStringToObject(state, "firmware_build_id", app->version);
+    cJSON_AddStringToObject(state, "firmware_app_version", app->version);
   }
   cJSON_AddNumberToObject(
       state, "uptime_seconds",

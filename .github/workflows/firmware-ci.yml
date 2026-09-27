@@ -123,6 +123,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           SRC=".pio/build/${{ matrix.image.env }}/firmware.bin"
           test -f "$SRC"
+          strings "$SRC" | grep -F "$EXPECTED_SHA"
           OUT="$RUNNER_TEMP/dmx-${{ matrix.image.name }}"
           rm -rf "$OUT"
           mkdir -p "$OUT"

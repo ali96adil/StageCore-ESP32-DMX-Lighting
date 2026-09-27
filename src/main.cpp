@@ -24,6 +24,10 @@
 #define STAGECORE_FW_VERSION "0.2.0-dev"
 #endif
 
+#ifndef STAGECORE_BUILD_REVISION
+#define STAGECORE_BUILD_REVISION "unknown"
+#endif
+
 namespace {
 
 const char *kTag = "stagecore-light";
@@ -58,8 +62,10 @@ extern "C" void app_main(void) {
   init_nvs();
 
   const esp_app_desc_t *app = esp_app_get_description();
-  ESP_LOGI(kTag, "StageCore ESP32 DMX Lighting Node %s build=%s",
+  ESP_LOGI(kTag,
+           "StageCore ESP32 DMX Lighting Node %s source=%s app=%s",
            STAGECORE_FW_VERSION,
+           STAGECORE_BUILD_REVISION,
            app != nullptr ? app->version : "unknown");
   ESP_LOGI(kTag, "safe boot: blackout");
 
