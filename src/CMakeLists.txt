@@ -13,6 +13,7 @@ idf_component_register(
         "lighting_contract.cpp"
         "lighting_configuration.cpp"
         "lighting_output.cpp"
+        "local_recovery.cpp"
         "provisioning.cpp"
         "stage_device_runtime.cpp"
         "trusted_clock.cpp"
