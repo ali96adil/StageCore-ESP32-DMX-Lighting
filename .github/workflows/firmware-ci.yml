@@ -135,7 +135,8 @@ jobs:
             echo "image=${{ matrix.image.name }}"
             echo "qualification=UNQUALIFIED"
           } > "$OUT/BUILDINFO"
-          test -z "$(git status --porcelain --untracked-files=all)"
+          git diff --quiet
+          git diff --cached --quiet
       - name: Upload exact unqualified firmware artifact
         uses: actions/upload-artifact@v4
         with:
