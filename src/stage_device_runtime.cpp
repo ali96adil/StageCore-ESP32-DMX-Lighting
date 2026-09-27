@@ -17,6 +17,7 @@
 #include "runtime_capabilities.h"
 #include "state_probe_v2.h"
 #include "trusted_clock.h"
+#include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -172,6 +173,10 @@ cJSON *observed_state_json(const RuntimeContext *context = nullptr) {
 
   cJSON_AddNumberToObject(state, "schema_version", 1);
   cJSON_AddStringToObject(state, "firmware_version", STAGECORE_FW_VERSION);
+  const esp_app_desc_t *app = esp_app_get_description();
+  if (app != nullptr && app->version[0] != '\0') {
+    cJSON_AddStringToObject(state, "firmware_build_id", app->version);
+  }
   cJSON_AddNumberToObject(
       state, "uptime_seconds",
       static_cast<double>(esp_timer_get_time() / 1000000LL));

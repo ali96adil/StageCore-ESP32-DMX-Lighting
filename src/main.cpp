@@ -3,6 +3,7 @@
 #include "config_store.h"
 #include "connection_loss_failsafe_policy.h"
 #include "device_identity.h"
+#include "esp_app_desc.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -56,7 +57,10 @@ std::string default_display_name(const std::string &device_id) {
 extern "C" void app_main(void) {
   init_nvs();
 
-  ESP_LOGI(kTag, "StageCore ESP32 DMX Lighting Node %s", STAGECORE_FW_VERSION);
+  const esp_app_desc_t *app = esp_app_get_description();
+  ESP_LOGI(kTag, "StageCore ESP32 DMX Lighting Node %s build=%s",
+           STAGECORE_FW_VERSION,
+           app != nullptr ? app->version : "unknown");
   ESP_LOGI(kTag, "safe boot: blackout");
 
   if (stagecore::lighting_output_init() != ESP_OK) {
