@@ -781,6 +781,7 @@ std::vector<ChannelLevelV1> lighting_current_levels() {
 }
 
 std::string lighting_authority() {
+  if (g_local_emergency_blackout.load()) return "LOCAL_WEB";
   std::string authority = "FAILSAFE";
   (void)copy_state(nullptr, nullptr, nullptr, nullptr, &authority);
   return authority;
@@ -1201,12 +1202,23 @@ esp_err_t lighting_local_emergency_blackout() {
   g_local_emergency_blackout.store(true);
 
   // Cancel any active fade/identify and clear queued command events through
-  // the normal failsafe path, then explicitly confirm all 12 physical slots
-  // at zero. The latch remains set even if output is unhealthy so later
-  // StageCore commands cannot restore nonzero output before an attended reboot.
-  (void)lighting_blackout(true);
+  // the normal failsafe path. Retry for a bounded period so an already-running
+  // output mutation cannot race past the emergency zero frame. The latch is
+  // set before this loop, so no new nonzero/configuration mutation can start.
+  esp_err_t blackout_err = ESP_FAIL;
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    blackout_err = lighting_blackout(true);
+    if (blackout_err == ESP_OK) break;
+    vTaskDelay(pdMS_TO_TICKS(25));
+  }
+
+  // Independently request all 12 physical slots at zero after the serialized
+  // blackout attempt. This is still software/output-task evidence, not an
+  // independent decoder or fixture measurement.
   const esp_err_t output_err = lighting_output_blackout_immediate();
-  if (output_err != ESP_OK || !lighting_output_dmx_healthy()) {
+  if (blackout_err != ESP_OK || output_err != ESP_OK ||
+      !lighting_output_dmx_healthy()) {
+    if (blackout_err != ESP_OK) return blackout_err;
     return output_err == ESP_OK ? ESP_ERR_INVALID_STATE : output_err;
   }
 
