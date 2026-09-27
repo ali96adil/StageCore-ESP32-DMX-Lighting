@@ -1,6 +1,7 @@
 #include <string>
 
 #include "config_store.h"
+#include "connection_loss_failsafe_policy.h"
 #include "device_identity.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -137,15 +138,26 @@ extern "C" void app_main(void) {
 
     const esp_err_t runtime_err = stagecore::run_stage_device_runtime(
         hub, credential, identity, config);
-    const esp_err_t failsafe_err = stagecore::lighting_blackout(true);
+    esp_err_t failsafe_err = stagecore::lighting_connection_loss_failsafe(
+        stagecore::kConnectionLossHoldMs,
+        stagecore::kConnectionLossFadeMs);
     if (failsafe_err != ESP_OK) {
-      ESP_LOGE(kTag, "failsafe blackout failed after runtime exit: %s",
+      ESP_LOGE(kTag,
+               "bounded connection-loss fade failed (%s); requesting "
+               "immediate blackout fallback",
+               esp_err_to_name(failsafe_err));
+      failsafe_err = stagecore::lighting_blackout(true);
+    }
+    if (failsafe_err != ESP_OK) {
+      ESP_LOGE(kTag, "failsafe blackout fallback failed after runtime exit: %s",
                esp_err_to_name(failsafe_err));
     }
     ESP_LOGW(kTag,
-             "Stage Device runtime ended (%s); failsafe blackout requested "
-             "before re-authentication",
-             esp_err_to_name(runtime_err));
+             "Stage Device runtime ended (%s); failsafe policy hold=%lldms "
+             "fade=%lldms completed before re-authentication",
+             esp_err_to_name(runtime_err),
+             static_cast<long long>(stagecore::kConnectionLossHoldMs),
+             static_cast<long long>(stagecore::kConnectionLossFadeMs));
     credential = stagecore::RuntimeCredential{};
     vTaskDelay(pdMS_TO_TICKS(2000));
   }

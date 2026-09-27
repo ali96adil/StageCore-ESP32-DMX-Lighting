@@ -29,6 +29,12 @@ jobs:
             tests/wifi_reconnect_policy_test.cpp \
             -o /tmp/stagecore-wifi-reconnect-test
           /tmp/stagecore-wifi-reconnect-test
+      - name: Test connection-loss failsafe policy (host)
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
+            tests/connection_loss_failsafe_policy_test.cpp \
+            -o /tmp/stagecore-connection-loss-failsafe-test
+          /tmp/stagecore-connection-loss-failsafe-test
       - name: Test dormant v2 assignment contract (host)
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
