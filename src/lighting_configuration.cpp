@@ -1163,9 +1163,17 @@ esp_err_t lighting_connection_loss_failsafe(
       xSemaphoreGive(g_lock);
     }
     if (!active) {
-      return zero && lighting_output_dmx_healthy()
+      if (!zero || !lighting_output_dmx_healthy()) {
+        return ESP_ERR_INVALID_STATE;
+      }
+      // The interpolated fade covers every configured logical channel. Finish
+      // with one output-task-confirmed all-physical-slot zero frame so stale or
+      // previously-unused DMX slots cannot survive a runtime-loss blackout.
+      const esp_err_t physical_zero = lighting_output_blackout_immediate();
+      return physical_zero == ESP_OK && lighting_output_dmx_healthy()
                  ? ESP_OK
-                 : ESP_ERR_INVALID_STATE;
+                 : (physical_zero == ESP_OK ? ESP_ERR_INVALID_STATE
+                                            : physical_zero);
     }
     vTaskDelay(pdMS_TO_TICKS(20));
   }
