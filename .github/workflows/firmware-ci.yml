@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 # One firmware batch = one head, superseded runs for this PR are canceled.
 # Independent host/v1/v2/probe/active jobs avoid sequentially rebuilding images.
 concurrency:
@@ -21,8 +24,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Checkout
+      - name: Checkout exact source revision
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Verify exact clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Test Wi-Fi reconnect policy (host)
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
@@ -75,8 +86,16 @@ jobs:
     env:
       PLATFORMIO_DISABLE_UPGRADE_CHECK: "1"
     steps:
-      - name: Checkout
+      - name: Checkout exact source revision
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Verify exact clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -97,3 +116,30 @@ jobs:
           grep -qx '#define CONFIG_GPTIMER_OBJ_CACHE_SAFE 1' "$CONFIG"
           grep -qx '#define CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP 1' "$CONFIG"
           grep -q -- '-DCONFIG_DMX_ISR_IN_IRAM=1' platformio.ini
+      - name: Stage exact unqualified firmware artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          SRC=".pio/build/${{ matrix.image.env }}/firmware.bin"
+          test -f "$SRC"
+          OUT="$RUNNER_TEMP/dmx-${{ matrix.image.name }}"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          cp "$SRC" "$OUT/firmware.bin"
+          sha256sum "$OUT/firmware.bin" > "$OUT/SHA256SUMS"
+          {
+            echo "source_revision=$EXPECTED_SHA"
+            echo "platformio=6.2.0"
+            echo "environment=${{ matrix.image.env }}"
+            echo "image=${{ matrix.image.name }}"
+            echo "qualification=UNQUALIFIED"
+          } > "$OUT/BUILDINFO"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Upload exact unqualified firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stagecore-dmx-${{ matrix.image.name }}-unqualified
+          path: ${{ runner.temp }}/dmx-${{ matrix.image.name }}/
+          retention-days: 7
+          if-no-files-found: error
