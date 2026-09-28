@@ -59,6 +59,11 @@ esp_err_t lighting_channels_fade(
 
 esp_err_t lighting_blackout(bool failsafe);
 
+// Physical local emergency fallback. Once latched, nonzero/configuration
+// mutations remain blocked until reboot and authority reports LOCAL_WEB.
+esp_err_t lighting_local_emergency_blackout();
+bool lighting_local_emergency_blackout_latched();
+
 esp_err_t lighting_blackout_fade(
     const std::string &command_id,
     int64_t fade_ms,
