@@ -353,6 +353,11 @@ esp_err_t wait_for_station_connection(int timeout_ms) {
   return (bits & kConnectedBit) ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+bool station_connected() {
+  if (g_wifi_events == nullptr) return false;
+  return (xEventGroupGetBits(g_wifi_events) & kConnectedBit) != 0;
+}
+
 [[noreturn]] void run_provisioning_portal(
     const std::string &device_id, const std::string &default_display_name) {
   ESP_ERROR_CHECK(init_network_stack());
