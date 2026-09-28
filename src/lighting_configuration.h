@@ -64,6 +64,13 @@ esp_err_t lighting_blackout(bool failsafe);
 esp_err_t lighting_local_emergency_blackout();
 bool lighting_local_emergency_blackout_latched();
 
+// Runtime loss preserves already accepted local output/fades for the bounded
+// hold, then transitions under FAILSAFE authority to a local fade-to-blackout.
+// No StageCore command completion/cancellation event is emitted for this fade.
+esp_err_t lighting_connection_loss_failsafe(
+    int64_t hold_ms,
+    int64_t fade_ms);
+
 esp_err_t lighting_blackout_fade(
     const std::string &command_id,
     int64_t fade_ms,
