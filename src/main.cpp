@@ -96,19 +96,19 @@ extern "C" void app_main(void) {
     stagecore::run_provisioning_portal(identity.device_id(), fallback_name);
   }
 
-  const esp_err_t recovery_err =
-      stagecore::start_local_hub_trust_reset_monitor();
-  if (recovery_err != ESP_OK) {
-    ESP_LOGE(kTag, "local Hub trust recovery unavailable: %s",
-             esp_err_to_name(recovery_err));
-  }
-
   if (stagecore::connect_station(config.wifi_ssid, config.wifi_password, 30000) !=
       ESP_OK) {
     stagecore::run_provisioning_portal(identity.device_id(),
                                        config.display_name.empty()
                                            ? fallback_name
                                            : config.display_name);
+  }
+
+  const esp_err_t recovery_err =
+      stagecore::start_local_hub_trust_reset_monitor();
+  if (recovery_err != ESP_OK) {
+    ESP_LOGE(kTag, "local recovery surface unavailable: %s",
+             esp_err_to_name(recovery_err));
   }
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2

@@ -63,23 +63,33 @@ Network/pairing/runtime work must never make boot restore an unexpected previous
 brightness.
 
 
-## Local Hub trust reset
+## Protected local recovery and diagnostics
 
-Normal Hub certificate pinning remains fail-closed. If the remembered Hub trust
-must be intentionally reset, the configured firmware exposes a **physical-only**
-recovery action rather than a network command:
+The configured node exposes one physical-presence recovery surface on the board
+BOOT button (GPIO 0 by default). It does not expose a general local lighting
+command API.
 
-1. let the normal application boot;
-2. press and continuously hold the board BOOT button (GPIO 0 by default) for
-   10 seconds;
-3. the firmware first requests and confirms failsafe blackout;
-4. only then it erases the remembered `hub_id`, `hub_fp`, and `hub_tls`
-   values and reboots for normal StageCore discovery/pairing.
+After the normal application has booted and joined the Stage LAN:
+
+- **2-second continuous hold:** latch an emergency all-slot blackout under
+  `LOCAL_WEB` authority. Nonzero/configuration-changing lighting operations
+  are blocked until an attended reboot. After blackout is confirmed, a
+  read-only diagnostics server is available for 60 seconds on TCP port 8088.
+  It exposes only software/runtime health such as DMX task health, authority,
+  configuration hash, logical levels, RSSI and whether Hub trust is configured.
+  It does not expose credentials or any output-changing route.
+- **10-second continuous hold:** while the same emergency blackout remains
+  confirmed, erase only the remembered `hub_id`, `hub_fp`, and `hub_tls`
+  values and reboot for normal StageCore discovery/pairing.
 
 Wi-Fi settings, persistent device identity, lighting configuration and any
-legacy Project configuration are not erased by this operation. The reset cannot
-be triggered through HTTP/WebSocket traffic. Physical acceptance remains
-separate from source/CI qualification.
+legacy Project configuration are preserved. The diagnostics status explicitly
+states that logical/output-task state is not independent decoder or fixture
+measurement.
+
+Physical button timing, browser access, DMX stability under read-only local-web
+activity, emergency blackout and re-pair behavior remain separate attended
+qualification gates.
 
 ## Planned firmware slices
 

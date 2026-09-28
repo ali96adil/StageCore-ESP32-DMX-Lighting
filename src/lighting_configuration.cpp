@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -35,6 +36,7 @@ std::vector<ChannelLevelV1> g_levels;
 std::string g_canonical;
 std::string g_hash;
 std::string g_authority = "FAILSAFE";
+std::atomic<bool> g_local_emergency_blackout{false};
 std::vector<LightingCommandEvent> g_events;
 
 struct ActiveFadeInternal {
@@ -779,6 +781,7 @@ std::vector<ChannelLevelV1> lighting_current_levels() {
 }
 
 std::string lighting_authority() {
+  if (g_local_emergency_blackout.load()) return "LOCAL_WEB";
   std::string authority = "FAILSAFE";
   (void)copy_state(nullptr, nullptr, nullptr, nullptr, &authority);
   return authority;
@@ -824,6 +827,7 @@ esp_err_t lighting_configuration_apply(
   if (configuration.empty() || configuration_hash == nullptr) {
     return ESP_ERR_INVALID_ARG;
   }
+  if (g_local_emergency_blackout.load()) return ESP_ERR_INVALID_STATE;
   esp_err_t err = ensure_lock();
   if (err != ESP_OK) return err;
 
@@ -906,6 +910,10 @@ esp_err_t lighting_channels_set(
       error_message == nullptr) {
     return ESP_ERR_INVALID_ARG;
   }
+  if (g_local_emergency_blackout.load()) {
+    *error_message = "Local emergency blackout is latched until reboot";
+    return ESP_ERR_INVALID_STATE;
+  }
   esp_err_t err = ensure_lock();
   if (err != ESP_OK) return err;
   if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
@@ -973,6 +981,10 @@ esp_err_t lighting_channels_fade(
       normalized == nullptr || error_message == nullptr) {
     return ESP_ERR_INVALID_ARG;
   }
+  if (g_local_emergency_blackout.load()) {
+    *error_message = "Local emergency blackout is latched until reboot";
+    return ESP_ERR_INVALID_STATE;
+  }
   esp_err_t err = ensure_lock();
   if (err != ESP_OK) return err;
   if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
@@ -1029,7 +1041,9 @@ esp_err_t lighting_blackout(bool failsafe) {
     return ESP_ERR_TIMEOUT;
   }
   if (g_ready) g_levels = blackout_levels(g_configuration);
-  g_authority = failsafe ? "FAILSAFE" : "STAGECORE";
+  g_authority = g_local_emergency_blackout.load()
+      ? "LOCAL_WEB"
+      : (failsafe ? "FAILSAFE" : "STAGECORE");
   xSemaphoreGive(g_lock);
   xSemaphoreGive(g_operation_lock);
   return ESP_OK;
@@ -1041,6 +1055,10 @@ esp_err_t lighting_blackout_fade(
     std::string *error_message) {
   if (command_id.empty() || fade_ms <= 0 || error_message == nullptr) {
     return ESP_ERR_INVALID_ARG;
+  }
+  if (g_local_emergency_blackout.load()) {
+    *error_message = "Local emergency blackout is latched until reboot";
+    return ESP_ERR_INVALID_STATE;
   }
   esp_err_t err = ensure_lock();
   if (err != ESP_OK) return err;
@@ -1088,6 +1106,10 @@ esp_err_t lighting_identify(
       duration_ms < 100 || duration_ms > 10000 ||
       error_message == nullptr) {
     return ESP_ERR_INVALID_ARG;
+  }
+  if (g_local_emergency_blackout.load()) {
+    *error_message = "Local emergency blackout is latched until reboot";
+    return ESP_ERR_INVALID_STATE;
   }
 
   esp_err_t err = ensure_lock();
@@ -1176,12 +1198,52 @@ esp_err_t lighting_identify(
   return ESP_OK;
 }
 
+esp_err_t lighting_local_emergency_blackout() {
+  g_local_emergency_blackout.store(true);
+
+  // Cancel any active fade/identify and clear queued command events through
+  // the normal failsafe path. Retry for a bounded period so an already-running
+  // output mutation cannot race past the emergency zero frame. The latch is
+  // set before this loop, so no new nonzero/configuration mutation can start.
+  esp_err_t blackout_err = ESP_FAIL;
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    blackout_err = lighting_blackout(true);
+    if (blackout_err == ESP_OK) break;
+    vTaskDelay(pdMS_TO_TICKS(25));
+  }
+
+  // Independently request all 12 physical slots at zero after the serialized
+  // blackout attempt. This is still software/output-task evidence, not an
+  // independent decoder or fixture measurement.
+  const esp_err_t output_err = lighting_output_blackout_immediate();
+  if (blackout_err != ESP_OK || output_err != ESP_OK ||
+      !lighting_output_dmx_healthy()) {
+    if (blackout_err != ESP_OK) return blackout_err;
+    return output_err == ESP_OK ? ESP_ERR_INVALID_STATE : output_err;
+  }
+
+  if (ensure_lock() != ESP_OK ||
+      xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  if (g_ready) g_levels = blackout_levels(g_configuration);
+  g_authority = "LOCAL_WEB";
+  xSemaphoreGive(g_lock);
+  return ESP_OK;
+}
+
+bool lighting_local_emergency_blackout_latched() {
+  return g_local_emergency_blackout.load();
+}
+
 void lighting_runtime_authority_acquired() {
   if (g_lock == nullptr ||
       xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
     return;
   }
-  if (g_ready && lighting_output_dmx_healthy()) {
+  if (g_local_emergency_blackout.load()) {
+    g_authority = "LOCAL_WEB";
+  } else if (g_ready && lighting_output_dmx_healthy()) {
     g_authority = "STAGECORE";
   } else {
     g_authority = "FAILSAFE";
