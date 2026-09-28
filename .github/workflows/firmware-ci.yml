@@ -9,8 +9,11 @@ on:
 permissions:
   contents: read
 
+env:
+  EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 # One firmware batch = one head, superseded runs for this PR are canceled.
-# Independent host/v1/v2/probe jobs avoid sequentially rebuilding three images.
+# Independent host/v1/v2/probe/active jobs avoid sequentially rebuilding images.
 concurrency:
   group: firmware-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -21,8 +24,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Checkout
+      - name: Checkout exact source revision
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Verify exact clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Test Wi-Fi reconnect policy (host)
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
+            tests/wifi_reconnect_policy_test.cpp \
+            -o /tmp/stagecore-wifi-reconnect-test
+          /tmp/stagecore-wifi-reconnect-test
+      - name: Test connection-loss failsafe policy (host)
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
+            tests/connection_loss_failsafe_policy_test.cpp \
+            -o /tmp/stagecore-connection-loss-failsafe-test
+          /tmp/stagecore-connection-loss-failsafe-test
       - name: Test dormant v2 assignment contract (host)
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
@@ -64,11 +87,21 @@ jobs:
             env: esp32dev-v2-experimental
           - name: v2-read-only-probe
             env: esp32dev-v2-probe-experimental
+          - name: v2-active-source-only
+            env: esp32dev-v2-active-experimental
     env:
       PLATFORMIO_DISABLE_UPGRADE_CHECK: "1"
     steps:
-      - name: Checkout
+      - name: Checkout exact source revision
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+      - name: Verify exact clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -77,7 +110,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check platformio==6.2.0
       - name: Build firmware image (do not flash)
         run: pio run -e ${{ matrix.image.env }}
-      - name: Verify DMX/GPTimer IRAM safety contract
+      - name: Verify DMX/GPTimer IRAM and BOYA flash support contract
         shell: bash
         run: |
           set -euo pipefail
@@ -87,4 +120,37 @@ jobs:
           grep -qx '#define CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM 1' "$CONFIG"
           grep -qx '#define CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM 1' "$CONFIG"
           grep -qx '#define CONFIG_GPTIMER_OBJ_CACHE_SAFE 1' "$CONFIG"
+          grep -qx '#define CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP 1' "$CONFIG"
           grep -q -- '-DCONFIG_DMX_ISR_IN_IRAM=1' platformio.ini
+      - name: Stage exact unqualified firmware artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          SRC=".pio/build/${{ matrix.image.env }}/firmware.bin"
+          test -f "$SRC"
+          strings "$SRC" | grep -F "$EXPECTED_SHA"
+          OUT="$RUNNER_TEMP/dmx-${{ matrix.image.name }}"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          cp "$SRC" "$OUT/firmware.bin"
+          (
+            cd "$OUT"
+            sha256sum firmware.bin > SHA256SUMS
+          )
+          {
+            echo "source_revision=$EXPECTED_SHA"
+            echo "platformio=6.2.0"
+            echo "environment=${{ matrix.image.env }}"
+            echo "image=${{ matrix.image.name }}"
+            echo "qualification=UNQUALIFIED"
+          } > "$OUT/BUILDINFO"
+          git diff --quiet
+          git diff --cached --quiet
+      - name: Upload exact unqualified firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stagecore-dmx-${{ matrix.image.name }}-unqualified
+          path: ${{ runner.temp }}/dmx-${{ matrix.image.name }}/
+          retention-days: 7
+          if-no-files-found: error
