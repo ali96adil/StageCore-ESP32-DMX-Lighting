@@ -63,6 +63,30 @@ Network/pairing/runtime work must never make boot restore an unexpected previous
 brightness.
 
 
+## Stage LAN self-recovery
+
+A node with a syntactically complete persisted configuration does **not** fall
+back into first-run provisioning just because the router/AP is unavailable.
+
+The station event handlers remain registered for the life of the running
+firmware. After a disconnect the node clears its connected state and retries
+with bounded backoff (1 s, 2 s, 4 s, 8 s, then 15 s maximum). A successful
+`GOT_IP` resets the backoff. If the node boots before the AP is available, the
+initial 30-second wait may expire but the station stays initialized and
+continues retrying with the same persisted credentials while DMX remains in
+failsafe/blackout.
+
+Hub mDNS discovery, TLS verification, pairing/authentication and Stage Device
+runtime work resume only after the station again has an IP address. Reconnect
+does not bypass Hub verification or replay a historical command.
+
+An actually missing/incomplete persisted configuration still enters the
+first-run provisioning portal. Wrong credentials are not silently replaced or
+weakened by the recovery loop.
+
+Physical router power-cycle, repeated disconnect/reconnect and Stage Device
+runtime recovery remain attended qualification checks.
+
 ## Protected local recovery and diagnostics
 
 The configured node exposes one physical-presence recovery surface on the board
