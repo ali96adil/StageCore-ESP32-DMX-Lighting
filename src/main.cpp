@@ -96,12 +96,16 @@ extern "C" void app_main(void) {
     stagecore::run_provisioning_portal(identity.device_id(), fallback_name);
   }
 
-  if (stagecore::connect_station(config.wifi_ssid, config.wifi_password, 30000) !=
-      ESP_OK) {
-    stagecore::run_provisioning_portal(identity.device_id(),
-                                       config.display_name.empty()
-                                           ? fallback_name
-                                           : config.display_name);
+  esp_err_t station_err =
+      stagecore::connect_station(config.wifi_ssid, config.wifi_password, 30000);
+  if (station_err != ESP_OK && station_err != ESP_ERR_TIMEOUT) {
+    hold_safe_failure("configured Stage LAN initialization failed");
+  }
+  while (station_err == ESP_ERR_TIMEOUT) {
+    ESP_LOGW(kTag,
+             "configured Stage LAN unavailable at boot; DMX remains blackout "
+             "and persisted Wi-Fi credentials stay active for reconnect");
+    station_err = stagecore::wait_for_station_connection(30000);
   }
 
   const esp_err_t recovery_err =
@@ -120,6 +124,14 @@ extern "C" void app_main(void) {
 #endif
 
   while (true) {
+    if (!stagecore::station_connected()) {
+      ESP_LOGW(kTag,
+               "Stage LAN offline; waiting for long-lived Wi-Fi recovery "
+               "before Hub discovery");
+      (void)stagecore::wait_for_station_connection(5000);
+      continue;
+    }
+
     stagecore::VerifiedHub hub;
     if (stagecore::discover_and_verify_hub(&hub) != ESP_OK) {
       ESP_LOGW(kTag, "no verified StageCore Hub yet; DMX remains blackout");
