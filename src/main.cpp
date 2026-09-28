@@ -1,7 +1,9 @@
 #include <string>
 
 #include "config_store.h"
+#include "connection_loss_failsafe_policy.h"
 #include "device_identity.h"
+#include "esp_app_desc.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -21,6 +23,10 @@
 
 #ifndef STAGECORE_FW_VERSION
 #define STAGECORE_FW_VERSION "0.2.0-dev"
+#endif
+
+#ifndef STAGECORE_BUILD_REVISION
+#define STAGECORE_BUILD_REVISION "unknown"
 #endif
 
 namespace {
@@ -56,7 +62,12 @@ std::string default_display_name(const std::string &device_id) {
 extern "C" void app_main(void) {
   init_nvs();
 
-  ESP_LOGI(kTag, "StageCore ESP32 DMX Lighting Node %s", STAGECORE_FW_VERSION);
+  const esp_app_desc_t *app = esp_app_get_description();
+  ESP_LOGI(kTag,
+           "StageCore ESP32 DMX Lighting Node %s source=%s app=%s",
+           STAGECORE_FW_VERSION,
+           STAGECORE_BUILD_REVISION,
+           app != nullptr ? app->version : "unknown");
   ESP_LOGI(kTag, "safe boot: blackout");
 
   if (stagecore::lighting_output_init() != ESP_OK) {
@@ -96,12 +107,16 @@ extern "C" void app_main(void) {
     stagecore::run_provisioning_portal(identity.device_id(), fallback_name);
   }
 
-  if (stagecore::connect_station(config.wifi_ssid, config.wifi_password, 30000) !=
-      ESP_OK) {
-    stagecore::run_provisioning_portal(identity.device_id(),
-                                       config.display_name.empty()
-                                           ? fallback_name
-                                           : config.display_name);
+  esp_err_t station_err =
+      stagecore::connect_station(config.wifi_ssid, config.wifi_password, 30000);
+  if (station_err != ESP_OK && station_err != ESP_ERR_TIMEOUT) {
+    hold_safe_failure("configured Stage LAN initialization failed");
+  }
+  while (station_err == ESP_ERR_TIMEOUT) {
+    ESP_LOGW(kTag,
+             "configured Stage LAN still unavailable; DMX remains blackout "
+             "while automatic reconnect continues");
+    station_err = stagecore::wait_for_station_connection(30000);
   }
 
   const esp_err_t recovery_err =
@@ -112,8 +127,21 @@ extern "C" void app_main(void) {
   }
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-  ESP_LOGW(kTag, "EXPERIMENTAL v2: projectless, blackout-only image; device=%s",
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL v2 ACTIVE candidate: projectless; Hub-owned exact "
+           "scope required before commands; device=%s",
            identity.device_id().c_str());
+#elif STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL v2 read-only probe: projectless, blackout-only; "
+           "device=%s",
+           identity.device_id().c_str());
+#else
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL v2 blackout-only: projectless; device=%s",
+           identity.device_id().c_str());
+#endif
 #else
   ESP_LOGI(kTag, "provisioned for project %s as %s",
            config.project_id.c_str(), config.display_name.c_str());
@@ -141,15 +169,33 @@ extern "C" void app_main(void) {
 
     const esp_err_t runtime_err = stagecore::run_stage_device_runtime(
         hub, credential, identity, config);
-    const esp_err_t failsafe_err = stagecore::lighting_blackout(true);
+    esp_err_t failsafe_err = stagecore::lighting_connection_loss_failsafe(
+        stagecore::kConnectionLossHoldMs,
+        stagecore::kConnectionLossFadeMs);
     if (failsafe_err != ESP_OK) {
-      ESP_LOGE(kTag, "failsafe blackout failed after runtime exit: %s",
+      ESP_LOGE(kTag,
+               "bounded connection-loss fade failed (%s); requesting "
+               "immediate blackout fallback",
+               esp_err_to_name(failsafe_err));
+      failsafe_err = stagecore::lighting_blackout(true);
+    }
+    if (failsafe_err != ESP_OK) {
+      ESP_LOGE(kTag, "failsafe blackout fallback failed after runtime exit: %s",
                esp_err_to_name(failsafe_err));
     }
-    ESP_LOGW(kTag,
-             "Stage Device runtime ended (%s); failsafe blackout requested "
-             "before re-authentication",
-             esp_err_to_name(runtime_err));
+    if (failsafe_err == ESP_OK) {
+      ESP_LOGW(kTag,
+               "Stage Device runtime ended (%s); failsafe policy hold=%lldms "
+               "fade=%lldms reached blackout before re-authentication",
+               esp_err_to_name(runtime_err),
+               static_cast<long long>(stagecore::kConnectionLossHoldMs),
+               static_cast<long long>(stagecore::kConnectionLossFadeMs));
+    } else {
+      ESP_LOGE(kTag,
+               "Stage Device runtime ended (%s); local failsafe could not "
+               "confirm blackout before re-authentication",
+               esp_err_to_name(runtime_err));
+    }
     credential = stagecore::RuntimeCredential{};
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
