@@ -73,7 +73,8 @@ struct PortalContext {
   std::string default_display_name;
 };
 
-void wifi_event_handler(void *, esp_event_base_t base, int32_t id, void *) {
+void wifi_event_handler(void *, esp_event_base_t base, int32_t id,
+                        void *event_data) {
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
     g_reconnect_delay_ms = wifi_reconnect::kInitialDelayMs;
     const esp_err_t err = esp_wifi_connect();
@@ -86,6 +87,10 @@ void wifi_event_handler(void *, esp_event_base_t base, int32_t id, void *) {
     if (g_wifi_events != nullptr) {
       xEventGroupClearBits(g_wifi_events, kConnectedBit);
     }
+    const auto *disconnected =
+        static_cast<const wifi_event_sta_disconnected_t *>(event_data);
+    ESP_LOGW(kTag, "Stage LAN disconnected reason=%d; reconnect scheduled",
+             disconnected != nullptr ? disconnected->reason : -1);
     schedule_reconnect();
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     g_reconnect_delay_ms = wifi_reconnect::kInitialDelayMs;
