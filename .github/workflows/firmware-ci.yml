@@ -23,6 +23,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Test bounded Wi-Fi reconnect policy (host)
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
+            tests/wifi_reconnect_policy_test.cpp \
+            -o /tmp/stagecore-wifi-reconnect-test
+          /tmp/stagecore-wifi-reconnect-test
       - name: Test dormant v2 assignment contract (host)
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror -Isrc \
