@@ -37,5 +37,23 @@ int main() {
     assert(policy.sample(true, 1));
   }
 
+  // Product gesture composition: the same continuous physical hold triggers
+  // emergency blackout first and the more destructive trust reset only later.
+  {
+    stagecore::LocalRecoveryHoldPolicy emergency(2000);
+    stagecore::LocalRecoveryHoldPolicy trust_reset(10000);
+    bool emergency_triggered = false;
+    bool trust_triggered = false;
+    for (int i = 0; i < 200; ++i) {
+      const bool e = emergency.sample(true, 50);
+      const bool t = trust_reset.sample(true, 50);
+      if (i == 39) emergency_triggered = e;
+      if (i < 199) assert(!t);
+      if (i == 199) trust_triggered = t;
+    }
+    assert(emergency_triggered);
+    assert(trust_triggered);
+  }
+
   return 0;
 }
