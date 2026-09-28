@@ -101,11 +101,14 @@ extern "C" void app_main(void) {
   if (station_err != ESP_OK && station_err != ESP_ERR_TIMEOUT) {
     hold_safe_failure("configured Stage LAN initialization failed");
   }
-  while (station_err == ESP_ERR_TIMEOUT) {
+  while (!stagecore::station_connected()) {
     ESP_LOGW(kTag,
              "configured Stage LAN unavailable at boot; DMX remains blackout "
              "and persisted Wi-Fi credentials stay active for reconnect");
     station_err = stagecore::wait_for_station_connection(30000);
+    if (station_err != ESP_OK && station_err != ESP_ERR_TIMEOUT) {
+      hold_safe_failure("configured Stage LAN recovery state failed");
+    }
   }
 
   const esp_err_t recovery_err =
