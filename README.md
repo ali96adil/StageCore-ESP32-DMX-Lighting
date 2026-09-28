@@ -62,6 +62,25 @@ and channels 1..12 at value 0. It continuously transmits this blackout frame.
 Network/pairing/runtime work must never make boot restore an unexpected previous
 brightness.
 
+
+## Local Hub trust reset
+
+Normal Hub certificate pinning remains fail-closed. If the remembered Hub trust
+must be intentionally reset, the configured firmware exposes a **physical-only**
+recovery action rather than a network command:
+
+1. let the normal application boot;
+2. press and continuously hold the board BOOT button (GPIO 0 by default) for
+   10 seconds;
+3. the firmware first requests and confirms failsafe blackout;
+4. only then it erases the remembered `hub_id`, `hub_fp`, and `hub_tls`
+   values and reboots for normal StageCore discovery/pairing.
+
+Wi-Fi settings, persistent device identity, lighting configuration and any
+legacy Project configuration are not erased by this operation. The reset cannot
+be triggered through HTTP/WebSocket traffic. Physical acceptance remains
+separate from source/CI qualification.
+
 ## Planned firmware slices
 
 1. **Foundation**

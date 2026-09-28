@@ -13,11 +13,13 @@ idf_component_register(
         "lighting_contract.cpp"
         "lighting_configuration.cpp"
         "lighting_output.cpp"
+        "local_recovery.cpp"
         "provisioning.cpp"
         "stage_device_runtime.cpp"
         "trusted_clock.cpp"
     INCLUDE_DIRS "."
     REQUIRES
+        driver
         esp_event
         esp_http_client
         esp_http_server
