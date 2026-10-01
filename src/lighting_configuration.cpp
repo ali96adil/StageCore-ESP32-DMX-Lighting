@@ -1,5 +1,6 @@
 #include "lighting_configuration.h"
 
+#include "connection_loss_failsafe_policy.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -48,6 +49,8 @@ struct ActiveFadeInternal {
   std::vector<ChannelLevelV1> from;
   std::vector<ChannelLevelV1> targets;
   bool blackout = false;
+  bool failsafe = false;
+  bool emit_event = true;
 };
 
 ActiveFadeInternal g_fade;
@@ -525,13 +528,15 @@ void fade_task(void *) {
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
       if (g_fade.active && g_fade.generation == fade.generation) {
         if (output_err != ESP_OK) {
-          LightingCommandEvent event;
-          event.command_id = fade.command_id;
-          event.status = "FAILED";
-          event.error_code = "DMX_OUTPUT_FAILED";
-          event.category = "DEVICE";
-          event.message = "DMX fade frame was not confirmed by the output task";
-          push_event_locked(std::move(event));
+          if (fade.emit_event) {
+            LightingCommandEvent event;
+            event.command_id = fade.command_id;
+            event.status = "FAILED";
+            event.error_code = "DMX_OUTPUT_FAILED";
+            event.category = "DEVICE";
+            event.message = "DMX fade frame was not confirmed by the output task";
+            push_event_locked(std::move(event));
+          }
           g_fade.active = false;
           g_authority = "FAILSAFE";
           if (failsafe_err == ESP_OK) {
@@ -539,15 +544,19 @@ void fade_task(void *) {
           }
         } else {
           update_levels_locked(levels);
-          g_authority = "STAGECORE";
+          g_authority = g_local_emergency_blackout.load()
+              ? "LOCAL_WEB"
+              : (fade.failsafe ? "FAILSAFE" : "STAGECORE");
           if (fraction >= 1.0) {
-            LightingCommandEvent event;
-            event.command_id = fade.command_id;
-            event.status = "COMPLETED";
-            event.levels = fade.targets;
-            event.blackout = fade.blackout;
-            event.fade_ms = fade.duration_ms;
-            push_event_locked(std::move(event));
+            if (fade.emit_event) {
+              LightingCommandEvent event;
+              event.command_id = fade.command_id;
+              event.status = "COMPLETED";
+              event.levels = fade.targets;
+              event.blackout = fade.blackout;
+              event.fade_ms = fade.duration_ms;
+              push_event_locked(std::move(event));
+            }
             g_fade.active = false;
           }
         }
@@ -1049,6 +1058,150 @@ esp_err_t lighting_blackout(bool failsafe) {
   return ESP_OK;
 }
 
+esp_err_t lighting_connection_loss_failsafe(
+    int64_t hold_ms,
+    int64_t fade_ms) {
+  if (hold_ms < 0 || hold_ms > 5000 || fade_ms <= 0 || fade_ms > 10000) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (g_local_emergency_blackout.load()) {
+    const esp_err_t output_err = lighting_output_blackout_immediate();
+    return output_err == ESP_OK && lighting_output_dmx_healthy()
+               ? ESP_OK
+               : (output_err == ESP_OK ? ESP_ERR_INVALID_STATE : output_err);
+  }
+  esp_err_t err = ensure_lock();
+  if (err != ESP_OK) return err;
+
+  // Preserve the last accepted local behavior briefly. The fade/identify task
+  // remains independent of the dead WebSocket, so an already accepted fade may
+  // continue during this bounded hold. No reconnect attempt starts until this
+  // function returns.
+  if (hold_ms > 0) {
+    vTaskDelay(pdMS_TO_TICKS(hold_ms));
+  }
+
+  if (xSemaphoreTake(g_operation_lock, pdMS_TO_TICKS(150)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  bool ready = false;
+  bool had_identify = false;
+  DmxSlotValue identify_restore{};
+  uint32_t generation = 0;
+  std::vector<LightingChannelConfigV1> configuration;
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    xSemaphoreGive(g_operation_lock);
+    return ESP_ERR_TIMEOUT;
+  }
+
+  ready = g_ready;
+  configuration = g_configuration;
+
+  // Runtime loss must never replay a terminal result from the disconnected
+  // socket. Keep the already accepted fade alive only for the hold above, then
+  // supersede it locally without producing a StageCore command event.
+  cancel_active_locked("superseded by connection-loss failsafe", false);
+  had_identify = cancel_identify_locked(
+      "superseded by connection-loss failsafe", false, &identify_restore);
+  g_events.clear();
+
+  if (!ready) {
+    g_authority = "FAILSAFE";
+    xSemaphoreGive(g_lock);
+    xSemaphoreGive(g_operation_lock);
+    return lighting_output_blackout_immediate();
+  }
+
+  const std::vector<ChannelLevelV1> targets =
+      blackout_levels(configuration);
+  if (targets.empty()) {
+    g_levels.clear();
+    g_authority = "FAILSAFE";
+    xSemaphoreGive(g_lock);
+    xSemaphoreGive(g_operation_lock);
+    return lighting_output_blackout_immediate();
+  }
+
+  std::vector<ChannelLevelV1> from;
+  from.reserve(targets.size());
+  for (const auto &target : targets) {
+    from.push_back(ChannelLevelV1{
+        target.channel_key,
+        current_level_for(g_levels, target.channel_key),
+    });
+  }
+  xSemaphoreGive(g_lock);
+
+  // Identify temporarily overrides a physical slot without changing g_levels.
+  // Restore that slot first so the failsafe fade begins from the tracked
+  // logical level rather than from an untracked identify pulse.
+  if (had_identify) {
+    err = lighting_output_apply_slots({identify_restore});
+    if (err != ESP_OK) {
+      xSemaphoreGive(g_operation_lock);
+      return err;
+    }
+  }
+
+  if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    xSemaphoreGive(g_operation_lock);
+    return ESP_ERR_TIMEOUT;
+  }
+  ActiveFadeInternal fade;
+  fade.active = true;
+  fade.generation = g_next_fade_generation++;
+  fade.started_us = esp_timer_get_time();
+  fade.duration_ms = fade_ms;
+  fade.from = std::move(from);
+  fade.targets = targets;
+  fade.blackout = true;
+  fade.failsafe = true;
+  fade.emit_event = false;
+  generation = fade.generation;
+  g_fade = std::move(fade);
+  g_authority = "FAILSAFE";
+  xSemaphoreGive(g_lock);
+  xSemaphoreGive(g_operation_lock);
+
+  // Wait only for the local output task. The upper bound leaves a small
+  // scheduler/output confirmation margin; timeout is handled by the caller
+  // with the existing immediate blackout fallback.
+  const TickType_t started = xTaskGetTickCount();
+  const TickType_t timeout = pdMS_TO_TICKS(
+      static_cast<uint32_t>(fade_ms + kConnectionLossSettleMarginMs));
+  while (static_cast<TickType_t>(xTaskGetTickCount() - started) < timeout) {
+    bool active = true;
+    bool zero = false;
+    if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+      active = g_fade.active && g_fade.generation == generation;
+      zero = true;
+      for (const auto &level : g_levels) {
+        if (level.level != 0.0) {
+          zero = false;
+          break;
+        }
+      }
+      xSemaphoreGive(g_lock);
+    }
+    if (!active) {
+      if (!zero || !lighting_output_dmx_healthy()) {
+        return ESP_ERR_INVALID_STATE;
+      }
+      // The interpolated fade covers every configured logical channel. Finish
+      // with one output-task-confirmed all-physical-slot zero frame so stale or
+      // previously-unused DMX slots cannot survive a runtime-loss blackout.
+      const esp_err_t physical_zero = lighting_output_blackout_immediate();
+      return physical_zero == ESP_OK && lighting_output_dmx_healthy()
+                 ? ESP_OK
+                 : (physical_zero == ESP_OK ? ESP_ERR_INVALID_STATE
+                                            : physical_zero);
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  return ESP_ERR_TIMEOUT;
+}
+
 esp_err_t lighting_blackout_fade(
     const std::string &command_id,
     int64_t fade_ms,
@@ -1212,9 +1365,6 @@ esp_err_t lighting_local_emergency_blackout() {
     vTaskDelay(pdMS_TO_TICKS(25));
   }
 
-  // Independently request all 12 physical slots at zero after the serialized
-  // blackout attempt. This is still software/output-task evidence, not an
-  // independent decoder or fixture measurement.
   const esp_err_t output_err = lighting_output_blackout_immediate();
   if (blackout_err != ESP_OK || output_err != ESP_OK ||
       !lighting_output_dmx_healthy()) {

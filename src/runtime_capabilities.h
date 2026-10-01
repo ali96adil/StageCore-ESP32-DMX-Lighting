@@ -15,8 +15,22 @@ inline bool runtime_exposes_legacy_configuration(bool experimental_v2) {
 }
 
 inline std::vector<const char *> runtime_advertised_capabilities(
-    bool experimental_v2, bool read_only_probe) {
+    bool experimental_v2, bool read_only_probe,
+    bool active_lighting = false) {
   if (experimental_v2) {
+    if (active_lighting) {
+      std::vector<const char *> out = {
+          "lighting.channels.set",
+          "lighting.channels.fade",
+          "lighting.blackout",
+          "lighting.identify",
+          "lighting.state.read",
+          "lighting.config.read",
+          "lighting.config.apply",
+      };
+      if (read_only_probe) out.push_back("lighting.state_probe/1");
+      return out;
+    }
     if (read_only_probe) return {"lighting.state_probe/1"};
     return {};
   }

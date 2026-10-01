@@ -21,4 +21,10 @@ enum class PersistedState : uint8_t {
 esp_err_t confirm_zero_and_persist_epoch(
     uint64_t epoch, PersistedState state, const std::string &project_id);
 
+// ACTIVE is never persisted as offline authority. A reconnect may proceed only
+// when the Hub's ACTIVE Project/epoch exactly matches the previously persisted
+// BLOCKED anti-rollback record established under software-confirmed blackout.
+esp_err_t verify_persisted_blocked_epoch(
+    uint64_t epoch, const std::string &project_id);
+
 }  // namespace stagecore::assignment_v2
