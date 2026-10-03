@@ -5,6 +5,7 @@
 
 #include "cJSON.h"
 #include "trusted_clock.h"
+#include "runtime_protocol.h"
 
 namespace stagecore {
 namespace {
@@ -158,7 +159,7 @@ std::string make_command_result(
   if (root == nullptr) return {};
 
   cJSON_AddStringToObject(root, "type", "command.result");
-  cJSON_AddNumberToObject(root, "schema_version", 1);
+  cJSON_AddNumberToObject(root, "schema_version", runtime_outer_schema_version());
   cJSON_AddStringToObject(root, "device_id", device_id.c_str());
   cJSON_AddStringToObject(root, "command_id", command_id.c_str());
   cJSON_AddStringToObject(root, "status", status);
