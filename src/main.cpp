@@ -112,11 +112,15 @@ extern "C" void app_main(void) {
   if (station_err != ESP_OK && station_err != ESP_ERR_TIMEOUT) {
     hold_safe_failure("configured Stage LAN initialization failed");
   }
-  while (station_err == ESP_ERR_TIMEOUT) {
+  if (station_err == ESP_ERR_TIMEOUT) {
     ESP_LOGW(kTag,
              "configured Stage LAN still unavailable; DMX remains blackout "
              "while automatic reconnect continues");
-    station_err = stagecore::wait_for_station_connection(30000);
+    station_err = stagecore::wait_for_station_connection_with_recovery(
+        identity.device_id(), config, 30000);
+  }
+  if (station_err != ESP_OK) {
+    hold_safe_failure("configured Stage LAN recovery failed");
   }
 
   const esp_err_t recovery_err =
@@ -148,6 +152,21 @@ extern "C" void app_main(void) {
 #endif
 
   while (true) {
+    if (stagecore::wait_for_station_connection(0) != ESP_OK) {
+      ESP_LOGW(kTag,
+               "Stage LAN disconnected; DMX remains blackout while "
+               "reconnect/recovery continues");
+      const esp_err_t recovery_err =
+          stagecore::wait_for_station_connection_with_recovery(
+              identity.device_id(), config);
+      if (recovery_err != ESP_OK) {
+        ESP_LOGE(kTag, "Stage LAN recovery failed: %s",
+                 esp_err_to_name(recovery_err));
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        continue;
+      }
+    }
+
     stagecore::VerifiedHub hub;
     if (stagecore::discover_and_verify_hub(&hub) != ESP_OK) {
       ESP_LOGW(kTag, "no verified StageCore Hub yet; DMX remains blackout");
