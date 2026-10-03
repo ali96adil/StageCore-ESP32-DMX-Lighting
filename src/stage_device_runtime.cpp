@@ -15,6 +15,7 @@
 #include "lighting_configuration.h"
 #include "lighting_output.h"
 #include "runtime_capabilities.h"
+#include "runtime_protocol.h"
 #include "state_probe_v2.h"
 #include "trusted_clock.h"
 #include "esp_app_desc.h"
@@ -1155,7 +1156,7 @@ std::string completed_result(const std::string &device_id,
     return {};
   }
   cJSON_AddStringToObject(root, "type", "command.result");
-  cJSON_AddNumberToObject(root, "schema_version", 1);
+  cJSON_AddNumberToObject(root, "schema_version", runtime_outer_schema_version());
   cJSON_AddStringToObject(root, "device_id", device_id.c_str());
   cJSON_AddStringToObject(root, "command_id", command_id.c_str());
   cJSON_AddStringToObject(root, "status", "COMPLETED");
