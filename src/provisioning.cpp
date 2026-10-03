@@ -36,6 +36,7 @@ uint32_t g_reconnect_delay_ms = wifi_reconnect::kInitialDelayMs;
 esp_event_handler_instance_t g_wifi_instance = nullptr;
 esp_event_handler_instance_t g_ip_instance = nullptr;
 bool g_handlers_registered = false;
+esp_netif_t *g_recovery_ap_netif = nullptr;
 
 void reconnect_timer_callback(void *) {
   const esp_err_t err = esp_wifi_connect();
@@ -71,6 +72,8 @@ void schedule_reconnect() {
 
 struct PortalContext {
   std::string default_display_name;
+  bool recovery = false;
+  DeviceConfig current_config;
 };
 
 void wifi_event_handler(void *, esp_event_base_t base, int32_t id, void *) {
@@ -176,6 +179,8 @@ bool valid_project_id(const std::string &value) {
 
 esp_err_t root_handler(httpd_req_t *req) {
   auto *ctx = static_cast<PortalContext *>(req->user_ctx);
+  const bool recovery = ctx != nullptr && ctx->recovery;
+
   std::string page =
       "<!doctype html><html><head><meta charset='utf-8'>"
       "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -183,29 +188,49 @@ esp_err_t root_handler(httpd_req_t *req) {
       "<style>body{font-family:system-ui;max-width:620px;margin:40px auto;padding:0 18px}"
       "label{display:block;margin:14px 0 5px}input{width:100%;padding:10px;box-sizing:border-box}"
       "button{margin-top:20px;padding:11px 18px}small{color:#666}</style></head><body>"
-      "<h1>StageCore Lighting Node</h1>"
-      "<p>First-run provisioning. DMX remains at blackout.</p>"
+      "<h1>StageCore Lighting Node</h1>";
+
+  if (recovery) {
+    page +=
+        "<p>Stage LAN recovery. DMX remains at blackout while network settings "
+        "are changed.</p>";
+  } else {
+    page +=
+        "<p>First-run provisioning. DMX remains at blackout.</p>";
+  }
+
+  page +=
       "<form method='post' action='/save'>"
       "<label>Wi-Fi SSID</label><input name='ssid' maxlength='32' required>"
       "<label>Wi-Fi password</label><input name='password' type='password' minlength='8' maxlength='63' required>";
+
+  if (!recovery) {
 #if !STAGECORE_EXPERIMENTAL_DEVICE_V2
-  page +=
-      "<label>StageCore Project ID</label><input name='project_id' maxlength='36' required "
-      "placeholder='xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'>";
+    page +=
+        "<label>StageCore Project ID</label><input name='project_id' maxlength='36' required "
+        "placeholder='xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'>";
 #endif
-  page += "<label>Display name</label><input name='display_name' maxlength='64' value='";
-  page += ctx ? ctx->default_display_name : "StageCore Lighting";
+    page +=
+        "<label>Display name</label><input name='display_name' maxlength='64' value='";
+    page += ctx ? ctx->default_display_name : "StageCore Lighting";
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-  page +=
-      "' required><small>Device identity is persistent. Assign this node to a Show inside StageCore after pairing. Output stays black until qualified.</small>"
-      "<button type='submit'>Save and restart</button></form></body></html>";
+    page +=
+        "' required><small>Device identity is persistent. Assign this node to a Show inside StageCore after pairing. Output stays black until qualified.</small>";
 #else
-  page +=
-      "' required><small>The Project ID is bootstrap-only. Daily cue authoring stays in StageCore.</small>"
-      "<button type='submit'>Save and restart</button></form></body></html>";
+    page +=
+        "' required><small>The Project ID is bootstrap-only. Daily cue authoring stays in StageCore.</small>";
 #endif
+  } else {
+    page +=
+        "<small>Only Wi-Fi credentials are replaced. Device identity, display "
+        "name, StageCore assignment and trusted Hub binding are preserved.</small>";
+  }
+
+  page +=
+      "<button type='submit'>Save and restart</button></form></body></html>";
 
   httpd_resp_set_type(req, "text/html; charset=utf-8");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   return httpd_resp_send(req, page.c_str(), page.size());
 }
 
@@ -228,20 +253,33 @@ esp_err_t save_handler(httpd_req_t *req) {
     received += static_cast<size_t>(rc);
   }
 
-  DeviceConfig config;
+  auto *ctx = static_cast<PortalContext *>(req->user_ctx);
+  const bool recovery = ctx != nullptr && ctx->recovery;
+  DeviceConfig config = recovery ? ctx->current_config : DeviceConfig{};
   config.wifi_ssid = form_value(body, "ssid");
   config.wifi_password = form_value(body, "password");
+
+  if (recovery) {
+    if (!form_value(body, "project_id").empty() ||
+        !form_value(body, "display_name").empty()) {
+      httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                          "recovery may change Wi-Fi only");
+      return ESP_FAIL;
+    }
+  } else {
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-  // Reject rather than trust a forged Project claim in an experimental v2
-  // setup request. The Operator assigns Projects using Hub authentication.
-  if (!form_value(body, "project_id").empty()) {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Project ID is Hub-owned");
-    return ESP_FAIL;
-  }
+    // Reject rather than trust a forged Project claim in an experimental v2
+    // setup request. The Operator assigns Projects using Hub authentication.
+    if (!form_value(body, "project_id").empty()) {
+      httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                          "Project ID is Hub-owned");
+      return ESP_FAIL;
+    }
 #else
-  config.project_id = form_value(body, "project_id");
+    config.project_id = form_value(body, "project_id");
 #endif
-  config.display_name = form_value(body, "display_name");
+    config.display_name = form_value(body, "display_name");
+  }
 
   if (config.wifi_ssid.empty() || config.wifi_ssid.size() > 32 ||
       config.wifi_password.size() < 8 || config.wifi_password.size() > 63 ||
@@ -250,7 +288,8 @@ esp_err_t save_handler(httpd_req_t *req) {
 #endif
       config.display_name.empty() ||
       config.display_name.size() > 64) {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid configuration");
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                        "invalid configuration");
     return ESP_FAIL;
   }
 
@@ -264,9 +303,46 @@ esp_err_t save_handler(httpd_req_t *req) {
   const char *response =
       "<html><body><h1>Saved</h1><p>Restarting StageCore Lighting Node.</p></body></html>";
   httpd_resp_set_type(req, "text/html; charset=utf-8");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
   vTaskDelay(pdMS_TO_TICKS(800));
   esp_restart();
+  return ESP_OK;
+}
+
+esp_err_t start_portal_server(PortalContext *context,
+                              httpd_handle_t *server) {
+  if (context == nullptr || server == nullptr) return ESP_ERR_INVALID_ARG;
+
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  config.max_uri_handlers = 4;
+  config.lru_purge_enable = true;
+  esp_err_t err = httpd_start(server, &config);
+  if (err != ESP_OK) return err;
+
+  httpd_uri_t root{};
+  root.uri = "/";
+  root.method = HTTP_GET;
+  root.handler = &root_handler;
+  root.user_ctx = context;
+  err = httpd_register_uri_handler(*server, &root);
+  if (err != ESP_OK) {
+    httpd_stop(*server);
+    *server = nullptr;
+    return err;
+  }
+
+  httpd_uri_t save{};
+  save.uri = "/save";
+  save.method = HTTP_POST;
+  save.handler = &save_handler;
+  save.user_ctx = context;
+  err = httpd_register_uri_handler(*server, &save);
+  if (err != ESP_OK) {
+    httpd_stop(*server);
+    *server = nullptr;
+    return err;
+  }
   return ESP_OK;
 }
 
@@ -353,6 +429,85 @@ esp_err_t wait_for_station_connection(int timeout_ms) {
   return (bits & kConnectedBit) ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+esp_err_t wait_for_station_connection_with_recovery(
+    const std::string &device_id, const DeviceConfig &current_config,
+    uint32_t already_offline_ms) {
+  if (g_wifi_events == nullptr || !current_config.complete()) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  constexpr uint32_t kWaitSliceMs = 5000;
+  uint32_t offline_ms = already_offline_ms;
+  while (!wifi_reconnect::recovery_portal_due(offline_ms)) {
+    const uint32_t remaining =
+        wifi_reconnect::kRecoveryPortalDelayMs - offline_ms;
+    const uint32_t wait_ms =
+        remaining < kWaitSliceMs ? remaining : kWaitSliceMs;
+    if (wait_for_station_connection(static_cast<int>(wait_ms)) == ESP_OK) {
+      return ESP_OK;
+    }
+    offline_ms += wait_ms;
+  }
+
+  ESP_LOGW(kTag,
+           "configured Stage LAN unavailable for %u ms; opening protected "
+           "Wi-Fi recovery AP while DMX remains blackout",
+           static_cast<unsigned>(offline_ms));
+
+  if (g_recovery_ap_netif == nullptr) {
+    g_recovery_ap_netif = esp_netif_create_default_wifi_ap();
+    if (g_recovery_ap_netif == nullptr) return ESP_ERR_NO_MEM;
+  }
+
+  const std::string ssid =
+      "StageCore-Light-Recovery-" + suffix_from_id(device_id);
+  const std::string password = random_ap_password();
+
+  wifi_config_t wifi{};
+  std::snprintf(reinterpret_cast<char *>(wifi.ap.ssid),
+                sizeof(wifi.ap.ssid), "%s", ssid.c_str());
+  wifi.ap.ssid_len = static_cast<uint8_t>(ssid.size());
+  std::snprintf(reinterpret_cast<char *>(wifi.ap.password),
+                sizeof(wifi.ap.password), "%s", password.c_str());
+  wifi.ap.max_connection = 2;
+  wifi.ap.authmode = WIFI_AUTH_WPA2_PSK;
+
+  esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+  if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_AP, &wifi);
+  if (err != ESP_OK) {
+    (void)esp_wifi_set_mode(WIFI_MODE_STA);
+    return err;
+  }
+
+  PortalContext context;
+  context.default_display_name = current_config.display_name;
+  context.recovery = true;
+  context.current_config = current_config;
+
+  httpd_handle_t server = nullptr;
+  err = start_portal_server(&context, &server);
+  if (err != ESP_OK) {
+    (void)esp_wifi_set_mode(WIFI_MODE_STA);
+    return err;
+  }
+
+  ESP_LOGW(kTag, "WIFI RECOVERY AVAILABLE");
+  ESP_LOGW(kTag, "join Wi-Fi SSID: %s", ssid.c_str());
+  ESP_LOGW(kTag, "temporary AP password: %s", password.c_str());
+  ESP_LOGW(kTag, "open http://192.168.4.1/");
+
+  while (true) {
+    if (wait_for_station_connection(1000) != ESP_OK) continue;
+
+    httpd_stop(server);
+    const esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (mode_err != ESP_OK) return mode_err;
+    ESP_LOGI(kTag,
+             "configured Stage LAN returned; Wi-Fi recovery AP closed");
+    return ESP_OK;
+  }
+}
+
 [[noreturn]] void run_provisioning_portal(
     const std::string &device_id, const std::string &default_display_name) {
   ESP_ERROR_CHECK(init_network_stack());
@@ -379,24 +534,11 @@ esp_err_t wait_for_station_connection(int timeout_ms) {
 
   static PortalContext context;
   context.default_display_name = default_display_name;
+  context.recovery = false;
+  context.current_config = DeviceConfig{};
 
-  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 4;
   httpd_handle_t server = nullptr;
-  ESP_ERROR_CHECK(httpd_start(&server, &config));
-
-  httpd_uri_t root{};
-  root.uri = "/";
-  root.method = HTTP_GET;
-  root.handler = &root_handler;
-  root.user_ctx = &context;
-  ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root));
-
-  httpd_uri_t save{};
-  save.uri = "/save";
-  save.method = HTTP_POST;
-  save.handler = &save_handler;
-  ESP_ERROR_CHECK(httpd_register_uri_handler(server, &save));
+  ESP_ERROR_CHECK(start_portal_server(&context, &server));
 
   ESP_LOGW(kTag, "PROVISIONING REQUIRED");
   ESP_LOGW(kTag, "join Wi-Fi SSID: %s", ssid.c_str());
