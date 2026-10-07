@@ -11,6 +11,7 @@
 #include "assignment_epoch_store.h"
 #include "assignment_v2.h"
 #include "command_contract.h"
+#include "config_store.h"
 #include "lighting_contract.h"
 #include "lighting_configuration.h"
 #include "lighting_output.h"
@@ -57,6 +58,7 @@ constexpr char kTag[] = "stagecore-runtime";
 constexpr char kProtocolVersion[] = "stagecore.device/2";
 constexpr EventBits_t kBlackoutBit = BIT5;
 constexpr EventBits_t kEpochReceiptBit = BIT6;
+constexpr EventBits_t kSetupAPMaintenanceBit = BIT10;
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
 constexpr EventBits_t kProbeBit = BIT7;
 #endif
@@ -87,6 +89,7 @@ struct RuntimeContext {
   std::string pending_command_frame;
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
   std::string pending_blackout_frame;
+  std::string pending_setup_ap_frame;
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
   std::string pending_probe_frame;
 #endif
@@ -137,6 +140,15 @@ cJSON *capabilities_json() {
       return nullptr;
     }
   }
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+  cJSON *setup_ap =
+      cJSON_CreateString("device.maintenance.setup-ap-password");
+  if (setup_ap == nullptr || !cJSON_AddItemToArray(array, setup_ap)) {
+    if (setup_ap != nullptr) cJSON_Delete(setup_ap);
+    cJSON_Delete(array);
+    return nullptr;
+  }
+#endif
   return array;
 }
 
@@ -388,6 +400,25 @@ bool canonical_hex_nonce(const cJSON *nonce) {
 }
 #endif
 
+#if STAGECORE_EXPERIMENTAL_DEVICE_V2
+bool queue_setup_ap_maintenance(RuntimeContext *context,
+                                const std::string &text) {
+  if (context == nullptr || context->command_lock == nullptr || text.empty()) {
+    return false;
+  }
+  if (xSemaphoreTake(context->command_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return false;
+  }
+  const bool accepted = context->pending_setup_ap_frame.empty();
+  if (accepted) context->pending_setup_ap_frame = text;
+  xSemaphoreGive(context->command_lock);
+  if (accepted) {
+    xEventGroupSetBits(context->events, kSetupAPMaintenanceBit);
+  }
+  return accepted;
+}
+#endif
+
 bool handle_complete_text(RuntimeContext *context, const std::string &text) {
   cJSON *root = cJSON_ParseWithLength(text.data(), text.size());
   if (root == nullptr) return false;
@@ -402,7 +433,22 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
             assignment_v2::valid_v2_wire_schema(schema->valuedouble) &&
             cJSON_IsString(device) && device->valuestring != nullptr &&
             context->device_id == device->valuestring;
-  if (ok && std::strcmp(type->valuestring, "assignment.state") == 0) {
+  if (ok &&
+      std::strcmp(type->valuestring, "maintenance.setup_ap_password") == 0) {
+    int64_t generation = 0;
+    const cJSON *request_id =
+        cJSON_GetObjectItemCaseSensitive(root, "request_id");
+    const cJSON *operation =
+        cJSON_GetObjectItemCaseSensitive(root, "operation");
+    ok = positive_wire_integer(root, "connection_generation", &generation) &&
+         generation == context->connection_generation &&
+         cJSON_IsString(request_id) && request_id->valuestring != nullptr &&
+         std::strlen(request_id->valuestring) == 36 &&
+         cJSON_IsString(operation) && operation->valuestring != nullptr &&
+         (std::strcmp(operation->valuestring, "SET") == 0 ||
+          std::strcmp(operation->valuestring, "RESET_DEFAULT") == 0);
+    if (ok) ok = queue_setup_ap_maintenance(context, text);
+  } else if (ok && std::strcmp(type->valuestring, "assignment.state") == 0) {
     const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
     const cJSON *project = cJSON_GetObjectItemCaseSensitive(root, "project_id");
     const cJSON *blackout = cJSON_GetObjectItemCaseSensitive(root, "blackout_required");
@@ -772,6 +818,85 @@ esp_err_t send_text(esp_websocket_client_handle_t client,
 }
 
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
+esp_err_t process_pending_setup_ap_maintenance(
+    RuntimeContext *context,
+    esp_websocket_client_handle_t client) {
+  if (context == nullptr || context->command_lock == nullptr ||
+      client == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  std::string frame;
+  if (xSemaphoreTake(context->command_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  frame.swap(context->pending_setup_ap_frame);
+  xSemaphoreGive(context->command_lock);
+  xEventGroupClearBits(context->events, kSetupAPMaintenanceBit);
+  if (frame.empty()) return ESP_ERR_INVALID_STATE;
+
+  cJSON *root = cJSON_ParseWithLength(frame.data(), frame.size());
+  if (root == nullptr) return ESP_ERR_INVALID_RESPONSE;
+  const cJSON *request_id =
+      cJSON_GetObjectItemCaseSensitive(root, "request_id");
+  const cJSON *operation =
+      cJSON_GetObjectItemCaseSensitive(root, "operation");
+  const cJSON *password =
+      cJSON_GetObjectItemCaseSensitive(root, "password");
+  int64_t generation = 0;
+  const bool envelope_ok =
+      positive_wire_integer(root, "connection_generation", &generation) &&
+      generation == context->connection_generation &&
+      cJSON_IsString(request_id) && request_id->valuestring != nullptr &&
+      std::strlen(request_id->valuestring) == 36 &&
+      cJSON_IsString(operation) && operation->valuestring != nullptr;
+  if (!envelope_ok) {
+    cJSON_Delete(root);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  esp_err_t apply_err = ESP_ERR_INVALID_ARG;
+  const char *detail = "Setup AP credential request rejected";
+  if (std::strcmp(operation->valuestring, "SET") == 0) {
+    if (cJSON_IsString(password) && password->valuestring != nullptr) {
+      const std::string value = password->valuestring;
+      if (value.size() >= 8 && value.size() <= 63) {
+        apply_err = save_setup_ap_password(value);
+        detail = apply_err == ESP_OK
+                     ? "Setup AP credential updated"
+                     : "Setup AP credential could not be persisted";
+      }
+    }
+  } else if (std::strcmp(operation->valuestring, "RESET_DEFAULT") == 0 &&
+             password == nullptr) {
+    apply_err = clear_setup_ap_password();
+    detail = apply_err == ESP_OK
+                 ? "Setup AP credential reset to shared default"
+                 : "Setup AP credential reset could not be persisted";
+  }
+
+  cJSON *result = cJSON_CreateObject();
+  if (result == nullptr) {
+    cJSON_Delete(root);
+    return ESP_ERR_NO_MEM;
+  }
+  cJSON_AddStringToObject(
+      result, "type", "maintenance.setup_ap_password.result");
+  cJSON_AddNumberToObject(result, "schema_version", 2);
+  cJSON_AddStringToObject(result, "device_id", context->device_id.c_str());
+  cJSON_AddNumberToObject(
+      result, "connection_generation", static_cast<double>(generation));
+  cJSON_AddStringToObject(result, "request_id", request_id->valuestring);
+  cJSON_AddStringToObject(
+      result, "maintenance_state", apply_err == ESP_OK ? "APPLIED" : "REJECTED");
+  cJSON_AddStringToObject(result, "detail", detail);
+  const std::string payload = print_json(result);
+  cJSON_Delete(result);
+  cJSON_Delete(root);
+  if (payload.empty()) return ESP_FAIL;
+  return send_text(client, payload);
+}
+
 esp_err_t process_pending_blackout(RuntimeContext *context,
                                    esp_websocket_client_handle_t client) {
   if (context == nullptr || context->command_lock == nullptr || client == nullptr) {
@@ -1781,7 +1906,8 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
     bits = xEventGroupWaitBits(
         context.events,
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
-        kDisconnectedBit | kProtocolErrorBit | kBlackoutBit
+        kDisconnectedBit | kProtocolErrorBit | kBlackoutBit |
+        kSetupAPMaintenanceBit
 #if STAGECORE_EXPERIMENTAL_V2_STATE_PROBE
         | kProbeBit
 #endif
@@ -1806,6 +1932,10 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
       break;
     }
 #if STAGECORE_EXPERIMENTAL_DEVICE_V2
+    if (bits & kSetupAPMaintenanceBit) {
+      err = process_pending_setup_ap_maintenance(&context, client);
+      if (err != ESP_OK) break;
+    }
     if (bits & kBlackoutBit) {
       err = process_pending_blackout(&context, client);
       if (err != ESP_OK) break;
