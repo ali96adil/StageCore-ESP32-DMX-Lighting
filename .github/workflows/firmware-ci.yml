@@ -78,6 +78,8 @@ jobs:
           /tmp/stagecore-recovery-policy-test
       - name: Test read-only UART evidence collector (host)
         run: python -m unittest discover -s tests -p 'test_collect_blackout_evidence.py' -v
+      - name: Test shared provisioning AP password contract
+        run: python -m unittest tests/provisioning_contract_test.py -v
 
   firmware-build:
     name: Build ${{ matrix.image.name }}

@@ -1,6 +1,5 @@
 #include "provisioning.h"
 
-#include <array>
 #include <cctype>
 #include <cstdio>
 #include <string>
@@ -11,7 +10,6 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
-#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -24,10 +22,18 @@
 #define STAGECORE_EXPERIMENTAL_DEVICE_V2 0
 #endif
 
+#ifndef STAGECORE_SETUP_AP_PASSWORD
+#define STAGECORE_SETUP_AP_PASSWORD "StageCoreSetup"
+#endif
+
 namespace stagecore {
 namespace {
 
 constexpr char kTag[] = "stagecore-net";
+constexpr char kSetupApPassword[] = STAGECORE_SETUP_AP_PASSWORD;
+static_assert(sizeof(kSetupApPassword) - 1 >= 8 &&
+                  sizeof(kSetupApPassword) - 1 <= 63,
+              "StageCore setup AP password must be 8-63 bytes");
 constexpr EventBits_t kConnectedBit = BIT0;
 
 EventGroupHandle_t g_wifi_events = nullptr;
@@ -104,16 +110,6 @@ std::string suffix_from_id(const std::string &device_id) {
   }
   if (compact.size() > 6) compact = compact.substr(compact.size() - 6);
   return compact;
-}
-
-std::string random_ap_password() {
-  static constexpr char kAlphabet[] =
-      "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-  std::array<char, 13> out{};
-  for (size_t i = 0; i < out.size() - 1; ++i) {
-    out[i] = kAlphabet[esp_random() % (sizeof(kAlphabet) - 1)];
-  }
-  return out.data();
 }
 
 int hex_value(char ch) {
@@ -461,7 +457,7 @@ esp_err_t wait_for_station_connection_with_recovery(
 
   const std::string ssid =
       "StageCore-Light-Recovery-" + suffix_from_id(device_id);
-  const std::string password = random_ap_password();
+  const std::string password = kSetupApPassword;
 
   wifi_config_t wifi{};
   std::snprintf(reinterpret_cast<char *>(wifi.ap.ssid),
@@ -513,7 +509,7 @@ esp_err_t wait_for_station_connection_with_recovery(
   ESP_ERROR_CHECK(init_network_stack());
 
   const std::string ssid = "StageCore-Light-" + suffix_from_id(device_id);
-  const std::string password = random_ap_password();
+  const std::string password = kSetupApPassword;
 
   esp_netif_create_default_wifi_ap();
   wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
