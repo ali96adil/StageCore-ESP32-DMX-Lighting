@@ -124,4 +124,4 @@ The upstream esp_dmx 4.1.0 release does not compile against ESP-IDF 5.3+ because
 
 ## Setup Wi-Fi access point
 
-First-run provisioning and saved-network recovery use device-specific SSIDs with the shared StageCore setup password `StageCoreSetup`. You no longer need Serial Monitor to discover a random AP password. The password may be overridden at build time with `STAGECORE_SETUP_AP_PASSWORD`; keep the same value across StageCore devices when using that override.
+First-run provisioning and saved-network recovery use device-specific SSIDs with the shared StageCore setup password `12345678`. You no longer need Serial Monitor to discover a random AP password. The password may be overridden at build time with `STAGECORE_SETUP_AP_PASSWORD`; keep the same value across StageCore devices when using that override.
