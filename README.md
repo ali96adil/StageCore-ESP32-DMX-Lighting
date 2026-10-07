@@ -121,3 +121,7 @@ the production protocol.
 ## esp_dmx compatibility note
 
 The upstream esp_dmx 4.1.0 release does not compile against ESP-IDF 5.3+ because `uart_signal_conn_t.module` was removed. This repository pins the single-commit compatibility fix from esp_dmx PR #223, which maps UART ports to the corresponding `PERIPH_UARTx_MODULE` values for ESP-IDF 5 while leaving the IDF 4 path unchanged. The PR reports DMX output verified on ESP32-D0WDQ6, UART2 / GPIO17, ESP-IDF 5.5.2.
+
+## Setup Wi-Fi access point
+
+First-run provisioning and saved-network recovery use device-specific SSIDs with the shared StageCore setup password `StageCoreSetup`. You no longer need Serial Monitor to discover a random AP password. The password may be overridden at build time with `STAGECORE_SETUP_AP_PASSWORD`; keep the same value across StageCore devices when using that override.
