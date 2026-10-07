@@ -36,6 +36,15 @@ static_assert(sizeof(kSetupApPassword) - 1 >= 8 &&
               "StageCore setup AP password must be 8-63 bytes");
 constexpr EventBits_t kConnectedBit = BIT0;
 
+std::string effective_setup_ap_password() {
+  std::string stored;
+  if (load_setup_ap_password(&stored) == ESP_OK &&
+      stored.size() >= 8 && stored.size() <= 63) {
+    return stored;
+  }
+  return kSetupApPassword;
+}
+
 EventGroupHandle_t g_wifi_events = nullptr;
 esp_timer_handle_t g_reconnect_timer = nullptr;
 uint32_t g_reconnect_delay_ms = wifi_reconnect::kInitialDelayMs;
@@ -457,7 +466,7 @@ esp_err_t wait_for_station_connection_with_recovery(
 
   const std::string ssid =
       "StageCore-Light-Recovery-" + suffix_from_id(device_id);
-  const std::string password = kSetupApPassword;
+  const std::string password = effective_setup_ap_password();
 
   wifi_config_t wifi{};
   std::snprintf(reinterpret_cast<char *>(wifi.ap.ssid),
@@ -489,7 +498,6 @@ esp_err_t wait_for_station_connection_with_recovery(
 
   ESP_LOGW(kTag, "WIFI RECOVERY AVAILABLE");
   ESP_LOGW(kTag, "join Wi-Fi SSID: %s", ssid.c_str());
-  ESP_LOGW(kTag, "temporary AP password: %s", password.c_str());
   ESP_LOGW(kTag, "open http://192.168.4.1/");
 
   while (true) {
@@ -509,7 +517,7 @@ esp_err_t wait_for_station_connection_with_recovery(
   ESP_ERROR_CHECK(init_network_stack());
 
   const std::string ssid = "StageCore-Light-" + suffix_from_id(device_id);
-  const std::string password = kSetupApPassword;
+  const std::string password = effective_setup_ap_password();
 
   esp_netif_create_default_wifi_ap();
   wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
@@ -538,7 +546,6 @@ esp_err_t wait_for_station_connection_with_recovery(
 
   ESP_LOGW(kTag, "PROVISIONING REQUIRED");
   ESP_LOGW(kTag, "join Wi-Fi SSID: %s", ssid.c_str());
-  ESP_LOGW(kTag, "temporary AP password: %s", password.c_str());
   ESP_LOGW(kTag, "open http://192.168.4.1/");
 
   while (true) vTaskDelay(pdMS_TO_TICKS(1000));
