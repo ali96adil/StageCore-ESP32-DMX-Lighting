@@ -64,6 +64,25 @@ class ProvisioningContract(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, maintenance)
 
+    def test_active_assignment_observer_never_activates_lighting(self):
+        pio = (ROOT / "platformio.ini").read_text()
+        runtime = (ROOT / "src" / "stage_device_runtime.cpp").read_text()
+        self.assertIn("[env:esp32dev-v2-active-observe-only]", pio)
+        self.assertIn("-DSTAGECORE_EXPERIMENTAL_V2_ACTIVE_OBSERVE_ONLY=1", pio)
+        self.assertIn("#error \"ACTIVE observe-only may not be combined with output activation\"", runtime)
+        self.assertIn("context->observe_only_active = active;", runtime)
+        self.assertIn("if (context.observe_only_active)", runtime)
+        self.assertIn("no scope ACK, no output authority, no epoch persistence", runtime)
+        self.assertIn("lighting_output_blackout_immediate()", runtime)
+        self.assertIn('return "BLOCKER";', runtime)
+        active_guard = runtime.index("if (context.observe_only_active)")
+        persist = runtime.index("assignment_v2::confirm_zero_and_persist_epoch", active_guard)
+        self.assertLess(active_guard, persist)
+        # The observer intentionally omits make_active_scope_ack and cannot
+        # process commands: those paths are compiled only in the ACTIVE image.
+        self.assertIn("#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE", runtime)
+        self.assertIn("if (!context->commands_enabled)", runtime)
+
     def test_local_foundation_duplicates_are_removed(self):
         for name in (
             "device_identity.cpp",
