@@ -81,7 +81,7 @@ class ProvisioningContract(unittest.TestCase):
         # The observer intentionally omits make_active_scope_ack and cannot
         # process commands: those paths are compiled only in the ACTIVE image.
         self.assertIn("#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE", runtime)
-        self.assertIn("if (!context->commands_enabled)", runtime)
+        self.assertIn("if (!context.commands_enabled)", runtime)
 
     def test_local_foundation_duplicates_are_removed(self):
         for name in (
