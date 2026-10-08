@@ -3,6 +3,7 @@
 #include <string>
 
 #include "esp_err.h"
+#include "foundation_store.h"
 
 namespace stagecore {
 
@@ -15,13 +16,7 @@ struct DeviceConfig {
   bool complete() const;
 };
 
-struct HubBinding {
-  std::string hub_id;
-  std::string fingerprint;
-  std::string tls_sha256;
-
-  bool complete() const;
-};
+FoundationStore &foundation_store();
 
 esp_err_t load_device_config(DeviceConfig *config);
 esp_err_t save_device_config(const DeviceConfig &config);
