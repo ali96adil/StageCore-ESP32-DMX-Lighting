@@ -125,3 +125,29 @@ The upstream esp_dmx 4.1.0 release does not compile against ESP-IDF 5.3+ because
 ## Setup Wi-Fi access point
 
 First-run provisioning and saved-network recovery use device-specific SSIDs with the shared StageCore setup password `12345678`. You no longer need Serial Monitor to discover a random AP password. The password may be overridden at build time with `STAGECORE_SETUP_AP_PASSWORD`; keep the same value across StageCore devices when using that override.
+
+
+## TLS Foundation qualification candidate (2026-10-08)
+
+This **Draft PR branch only** pins the Foundation TLS bootstrap fix from StageCore
+[PR #447](https://github.com/ali96adil/StageCore/pull/447), commit
+`4495a381cc40f06f44e0a16da4a4dc82a9bceb6c`.
+It addresses the ESP-IDF self-signed Hub TLS setup failure encountered on
+StageLaser. This is not a production firmware release or permission to flash.
+
+Source build checks (no device update):
+
+```sh
+pio run -e esp32dev
+pio run -e esp32dev-v2-active-experimental
+```
+
+The active v2 DMX environment remains EXPERIMENTAL. Do not flash the show node until attended blackout, DMX channels, reconnect, assignment epoch and Cues are verified with a safe rollback plan.
+
+**Security gate:** The initial discovery fingerprint is advertised on the local
+network. Until the Hub fingerprint is verified through an independently trusted
+channel or an authenticated prior binding, a spoofed first discovery must not
+be treated as authenticated trust. Review wrong-pin failure, pairing,
+reconnect, and credential handling before merging the Foundation fix.
+
+Pass CI and test all affected board targets before any attended physical flash.
