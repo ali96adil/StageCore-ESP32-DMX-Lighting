@@ -5,6 +5,7 @@
 #include <string>
 
 #include "config_store.h"
+#include "foundation_contract.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -22,27 +23,23 @@
 #define STAGECORE_EXPERIMENTAL_DEVICE_V2 0
 #endif
 
-#ifndef STAGECORE_SETUP_AP_PASSWORD
-#define STAGECORE_SETUP_AP_PASSWORD "12345678"
-#endif
-
 namespace stagecore {
 namespace {
 
 constexpr char kTag[] = "stagecore-net";
-constexpr char kSetupApPassword[] = STAGECORE_SETUP_AP_PASSWORD;
-static_assert(sizeof(kSetupApPassword) - 1 >= 8 &&
-                  sizeof(kSetupApPassword) - 1 <= 63,
+static_assert(sizeof(kDefaultSetupAPPassword) - 1 >= 8 &&
+                  sizeof(kDefaultSetupAPPassword) - 1 <= 63,
               "StageCore setup AP password must be 8-63 bytes");
 constexpr EventBits_t kConnectedBit = BIT0;
 
 std::string effective_setup_ap_password() {
-  std::string stored;
-  if (load_setup_ap_password(&stored) == ESP_OK &&
-      stored.size() >= 8 && stored.size() <= 63) {
-    return stored;
+  std::string password;
+  if (foundation_store().EffectiveSetupAPPassword(&password) == ESP_OK) {
+    return password;
   }
-  return kSetupApPassword;
+  // NVS read failure must not produce an open or random AP. Preserve the
+  // canonical protected fallback while keeping all credentials out of logs.
+  return kDefaultSetupAPPassword;
 }
 
 EventGroupHandle_t g_wifi_events = nullptr;
