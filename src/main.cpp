@@ -57,6 +57,24 @@ std::string default_display_name(const std::string &device_id) {
   return "StageCore Lighting " + suffix;
 }
 
+stagecore::FoundationDeviceDescriptor foundation_descriptor() {
+  stagecore::FoundationDeviceDescriptor descriptor;
+  descriptor.hostname_prefix = "stagecore-light-";
+  descriptor.platform = "esp32";
+  descriptor.architecture = "xtensa";
+  descriptor.firmware_version = STAGECORE_FW_VERSION;
+  descriptor.capabilities = {
+      "lighting.channels.set",
+      "lighting.channels.fade",
+      "lighting.blackout",
+      "lighting.state.read",
+      "lighting.identify",
+      "lighting.config.read",
+      "lighting.config.apply",
+  };
+  return descriptor;
+}
+
 }  // namespace
 
 extern "C" void app_main(void) {
@@ -91,6 +109,10 @@ extern "C" void app_main(void) {
     hold_safe_failure("persistent P-256 identity unavailable");
   }
   ESP_LOGI(kTag, "device_id=%s", identity.device_id().c_str());
+
+  stagecore::FoundationStore &foundation = stagecore::foundation_store();
+  const stagecore::FoundationDeviceDescriptor descriptor =
+      foundation_descriptor();
 
   stagecore::DeviceConfig config;
   if (stagecore::load_device_config(&config) != ESP_OK) {
@@ -168,7 +190,7 @@ extern "C" void app_main(void) {
     }
 
     stagecore::VerifiedHub hub;
-    if (stagecore::discover_and_verify_hub(&hub) != ESP_OK) {
+    if (stagecore::discover_and_verify_hub(&foundation, &hub) != ESP_OK) {
       ESP_LOGW(kTag, "no verified StageCore Hub yet; DMX remains blackout");
       vTaskDelay(pdMS_TO_TICKS(5000));
       continue;
@@ -179,7 +201,8 @@ extern "C" void app_main(void) {
 
     stagecore::RuntimeCredential credential;
     if (stagecore::ensure_paired_and_authenticate(
-            hub, &identity, config.display_name, &credential) != ESP_OK) {
+            hub, &identity, descriptor, config.display_name, &credential) !=
+        ESP_OK) {
       ESP_LOGW(kTag,
                "StageCore pairing/auth unavailable; DMX remains blackout");
       vTaskDelay(pdMS_TO_TICKS(5000));
