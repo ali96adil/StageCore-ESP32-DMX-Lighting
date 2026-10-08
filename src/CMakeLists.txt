@@ -6,17 +6,13 @@ idf_component_register(
         "state_probe_v2.cpp"
         "assignment_epoch_store.cpp"
         "config_store.cpp"
-        "device_identity.cpp"
         "dmx_driver_diagnostics.c"
-        "hub_discovery.cpp"
-        "hub_security.cpp"
         "lighting_contract.cpp"
         "lighting_configuration.cpp"
         "lighting_output.cpp"
         "local_recovery.cpp"
         "provisioning.cpp"
         "stage_device_runtime.cpp"
-        "trusted_clock.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         driver
@@ -32,4 +28,5 @@ idf_component_register(
         mbedtls
         mdns
         nvs_flash
+        stagecore_foundation
 )

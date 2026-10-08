@@ -80,6 +80,8 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_collect_blackout_evidence.py' -v
       - name: Test shared provisioning AP password contract
         run: python -m unittest tests/provisioning_contract_test.py -v
+      - name: Test shared Firmware Foundation dependency
+        run: python -m unittest tests/foundation_dependency_contract_test.py -v
 
   firmware-build:
     name: Build ${{ matrix.image.name }}

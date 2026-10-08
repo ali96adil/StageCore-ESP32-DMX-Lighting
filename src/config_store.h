@@ -3,6 +3,7 @@
 #include <string>
 
 #include "esp_err.h"
+#include "foundation_store.h"
 
 namespace stagecore {
 
@@ -11,14 +12,6 @@ struct DeviceConfig {
   std::string wifi_password;
   std::string project_id;
   std::string display_name;
-
-  bool complete() const;
-};
-
-struct HubBinding {
-  std::string hub_id;
-  std::string fingerprint;
-  std::string tls_sha256;
 
   bool complete() const;
 };

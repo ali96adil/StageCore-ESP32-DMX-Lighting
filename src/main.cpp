@@ -92,6 +92,25 @@ extern "C" void app_main(void) {
   }
   ESP_LOGI(kTag, "device_id=%s", identity.device_id().c_str());
 
+  // Shared Firmware Foundation owns identity/trust/authentication persistence.
+  // Keep the deployed NVS namespace so existing Hub trust and Setup AP
+  // overrides survive this source migration unchanged.
+  stagecore::FoundationStore foundation_store("stagecore");
+  stagecore::FoundationDeviceDescriptor foundation_descriptor;
+  foundation_descriptor.hostname_prefix = "stagecore-light-";
+  foundation_descriptor.platform = "esp32";
+  foundation_descriptor.architecture = "xtensa";
+  foundation_descriptor.firmware_version = STAGECORE_FW_VERSION;
+  foundation_descriptor.capabilities = {
+      "lighting.channels.set",
+      "lighting.channels.fade",
+      "lighting.blackout",
+      "lighting.state.read",
+      "lighting.identify",
+      "lighting.config.read",
+      "lighting.config.apply",
+  };
+
   stagecore::DeviceConfig config;
   if (stagecore::load_device_config(&config) != ESP_OK) {
     hold_safe_failure("configuration storage unavailable");
@@ -168,7 +187,7 @@ extern "C" void app_main(void) {
     }
 
     stagecore::VerifiedHub hub;
-    if (stagecore::discover_and_verify_hub(&hub) != ESP_OK) {
+    if (stagecore::discover_and_verify_hub(&foundation_store, &hub) != ESP_OK) {
       ESP_LOGW(kTag, "no verified StageCore Hub yet; DMX remains blackout");
       vTaskDelay(pdMS_TO_TICKS(5000));
       continue;
@@ -179,7 +198,8 @@ extern "C" void app_main(void) {
 
     stagecore::RuntimeCredential credential;
     if (stagecore::ensure_paired_and_authenticate(
-            hub, &identity, config.display_name, &credential) != ESP_OK) {
+            hub, &identity, foundation_descriptor, config.display_name,
+            &credential) != ESP_OK) {
       ESP_LOGW(kTag,
                "StageCore pairing/auth unavailable; DMX remains blackout");
       vTaskDelay(pdMS_TO_TICKS(5000));
