@@ -49,6 +49,12 @@
 #ifndef STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
 #define STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE 0
 #endif
+#ifndef STAGECORE_EXPERIMENTAL_V2_ACTIVE_OBSERVE_ONLY
+#define STAGECORE_EXPERIMENTAL_V2_ACTIVE_OBSERVE_ONLY 0
+#endif
+#if STAGECORE_EXPERIMENTAL_V2_ACTIVE_OBSERVE_ONLY && STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+#error "ACTIVE observe-only may not be combined with output activation"
+#endif
 
 namespace stagecore {
 namespace {
@@ -103,6 +109,9 @@ struct RuntimeContext {
   std::atomic<int64_t> assignment_epoch{0};
   int64_t connection_generation = 0;
   bool blocked_epoch = false;
+#if STAGECORE_EXPERIMENTAL_V2_ACTIVE_OBSERVE_ONLY
+  bool observe_only_active = false;
+#endif
 #endif
   std::string last_accepted_command_id;
   std::string last_applied_command_id;
@@ -461,7 +470,7 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
     const bool blocked = cJSON_IsString(state) && state->valuestring &&
         std::strcmp(state->valuestring, "BLOCKED") == 0;
     bool active = false;
-#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE || STAGECORE_EXPERIMENTAL_V2_ACTIVE_OBSERVE_ONLY
     const cJSON *snapshot =
         cJSON_GetObjectItemCaseSensitive(root, "runtime_snapshot_id");
     const cJSON *configuration_hash =
@@ -480,7 +489,7 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
         unassigned && project_unassigned && ack_required == nullptr;
     const bool blocked_shape =
         blocked && project_assigned && cJSON_IsTrue(ack_required);
-#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
+#if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE || STAGECORE_EXPERIMENTAL_V2_ACTIVE_OBSERVE_ONLY
     const bool active_shape =
         active && project_assigned &&
         cJSON_IsString(snapshot) && snapshot->valuestring &&
@@ -499,6 +508,9 @@ bool handle_complete_text(RuntimeContext *context, const std::string &text) {
       context->project_id = (blocked || active) ? project->valuestring : "";
       context->connection_generation = generation;
       context->blocked_epoch = blocked;
+#if STAGECORE_EXPERIMENTAL_V2_ACTIVE_OBSERVE_ONLY
+      context->observe_only_active = active;
+#endif
 #if STAGECORE_EXPERIMENTAL_V2_LIGHTING_ACTIVE
       context->active_epoch = active;
       context->commands_enabled = false;
@@ -1845,6 +1857,18 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
   } else
 #endif
   {
+#if STAGECORE_EXPERIMENTAL_V2_ACTIVE_OBSERVE_ONLY
+    if (context.observe_only_active) {
+      // Existing ACTIVE assignment is *observed* for commissioning only.
+      // Never alter its NVS anti-rollback state, send a scope ACK, enable
+      // output commands or impersonate a BLOCKED/UNASSIGNED epoch.
+      // Hub keeps commands_enabled=false until an authenticated scope ACK.
+      ESP_LOGW(kTag,
+               "ACTIVE assignment observed in blackout-only mode; "
+               "no scope ACK, no output authority, no epoch persistence");
+    } else
+#endif
+    {
     // UNASSIGNED/BLOCKED remains the #22 behavior: persist only anti-rollback
     // metadata after all-slot zero; this grants no show command authority.
     err = assignment_v2::confirm_zero_and_persist_epoch(
@@ -1870,6 +1894,7 @@ esp_err_t run_stage_device_runtime(const VerifiedHub &hub,
         goto cleanup;
       }
       ESP_LOGI(kTag, "Hub persisted software-zero ACK for BLOCKED epoch");
+    }
     }
   }
 #else

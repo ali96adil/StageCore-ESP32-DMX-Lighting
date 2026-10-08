@@ -93,6 +93,8 @@ jobs:
             env: esp32dev
           - name: v2-blackout-only
             env: esp32dev-v2-experimental
+          - name: v2-active-observe-only
+            env: esp32dev-v2-active-observe-only
           - name: v2-read-only-probe
             env: esp32dev-v2-probe-experimental
           - name: v2-active-source-only
