@@ -151,3 +151,34 @@ be treated as authenticated trust. Review wrong-pin failure, pairing,
 reconnect, and credential handling before merging the Foundation fix.
 
 Pass CI and test all affected board targets before any attended physical flash.
+
+
+### Existing ACTIVE assignment — blackout-only observer qualification
+
+An installed v2 DMX node can have a Hub-owned `ACTIVE` assignment even when its
+currently selected experimental image is the original blackout-only candidate.
+That older image intentionally rejects the `ACTIVE` assignment frame, causing
+a repeated authenticated WebSocket reconnect with `ESP_ERR_INVALID_RESPONSE`.
+
+For non-actuating on-bench diagnostics only, use the separately gated image:
+
+```sh
+pio run -e esp32dev-v2-active-observe-only
+```
+
+This image accepts the Hub-issued ACTIVE assignment *envelope* only when its
+full non-actuating shape is valid (project, published-snapshot ID, configuration
+hash, forced blackout, new connection generation, and `commands_enabled=false`).
+It immediately asserts a 12-slot software blackout and reports readiness
+`BLOCKER`. Crucially it **never** sends the ACTIVE scope ACK, never enables
+show commands, never applies the Project's lighting configuration, and does not
+rewrite the persisted assignment-epoch anti-rollback metadata merely to observe
+an ACTIVE device. The Hub retains the original ACTIVE assignment but grants no
+show-output authority to this socket. Restoring a show-capable image requires a
+separate, attended qualification of the authentic ACTIVE scope handshake.
+
+**Safety:** This is not a lighting-control release. Keep the decoder/fixtures
+isolated from the show network during tests. Restore the locally backed-up
+previous working firmware if live lighting control is required before v2 ACTIVE
+is physically qualified; do not clear NVS, force an assignment transition, or
+bypass the Hub's epoch/snapshot checks.
